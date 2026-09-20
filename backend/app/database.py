@@ -1,4 +1,5 @@
 """SQLAlchemy engine and session setup."""
+
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
