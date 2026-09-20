@@ -1,0 +1,61 @@
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+MappingValue = str | list[str]
+
+
+class ImportPreview(BaseModel):
+    report_type: str
+    file_name: str
+    error: str | None = None
+    header_row: int | None = None
+    headers: list[str] = []
+    mapping: dict[str, MappingValue] = {}
+    mapping_source: str | None = None
+    suggested_mapping: dict[str, MappingValue] = {}
+    raw_rows: list[list[str]] = []
+    rows_found: int = 0
+    would_import: int = 0
+    duplicates: int = 0
+    invalid: list[str] = []
+    invalid_count: int = 0
+    totals_ignored: int = 0
+    period: str | None = None
+    parsed_sample: list[dict[str, Any]] = []
+    profit_loss: dict[str, Decimal | str | None] | None = None
+
+
+class ImportResult(BaseModel):
+    import_log_id: int
+    report_type: str
+    file_name: str
+    period: str | None
+    rows_found: int
+    imported: int
+    duplicates_skipped: int
+    invalid_skipped: int
+    invalid: list[str]
+    totals_ignored: int
+    duplicate_file: bool
+    fys_affected: list[str]
+    alerts_raised: int
+
+
+class ImportLogRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    client_id: int
+    file_name: str
+    report_type: str
+    period: str | None
+    rows_imported: int
+    rows_skipped: int
+    imported_at: datetime
+
+
+class MappingBody(BaseModel):
+    mapping: dict[str, MappingValue]

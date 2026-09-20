@@ -1,6 +1,11 @@
 from decimal import Decimal
 
-from app.utils.indian_format import format_crores, format_indian, format_indian_commas, format_lakhs
+from app.utils.indian_format import (
+    format_crores,
+    format_indian,
+    format_indian_commas,
+    format_lakhs,
+)
 
 
 def test_format_indian_commas_one_crore() -> None:

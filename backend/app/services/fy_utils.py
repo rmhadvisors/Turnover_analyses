@@ -88,3 +88,20 @@ def same_period_previous_fy(fy: str, as_of: date) -> Period:
 def period_label(period: Period) -> str:
     """Short label for a period, e.g. 'Apr-Aug'."""
     return f"{period.start.strftime('%b')}-{period.end.strftime('%b')}"
+
+
+def is_valid_fy(fy: str) -> bool:
+    """True for labels like '2024-25' whose second part follows the first year."""
+    if len(fy) != 7 or fy[4] != "-" or not (fy[:4] + fy[5:]).isdigit():
+        return False
+    return int(fy[5:]) == (int(fy[:4]) + 1) % 100
+
+
+def ytd_window_pair(fy: str, as_of: date) -> tuple[Period, Period]:
+    """Month-aligned (current, previous-FY) windows for a like-for-like YTD comparison."""
+    months = months_elapsed_in_fy(fy, as_of)
+    start, end = fy_bounds(fy)
+    if months <= 0:
+        return Period(start, start), same_period_previous_fy(fy, as_of)
+    current_end = min(_add_months_end(start, months), end)
+    return Period(start, current_end), same_period_previous_fy(fy, as_of)

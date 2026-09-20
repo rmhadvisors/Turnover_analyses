@@ -8,8 +8,9 @@ later) is a separate pluggable concern - see `notify()` below.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import Enum
 
@@ -130,7 +131,64 @@ def evaluate_absolute_limit_alert(
     )
 
 
+@dataclass(frozen=True)
+class LimitCheck:
+    status: AbsoluteLimitStatus
+    cumulative: Decimal
+    crossed_on: date | None
+    crossed_voucher_no: str | None
+
+
+def check_limit_series(
+    entries: Sequence[tuple[date, str, Decimal]],
+    limit_amount: Decimal,
+    approaching_pct: Decimal = DEFAULT_APPROACHING_PCT,
+) -> LimitCheck:
+    """Walk signed (date, voucher_no, value) entries in date order, accumulating a
+    running total, and report the final status plus the voucher on which the
+    running total first exceeded the limit (None if it never did, or if credit
+    notes later brought the total back under the limit)."""
+    running = Decimal(0)
+    crossed_on: date | None = None
+    crossed_no: str | None = None
+    for entry_date, voucher_no, value in sorted(entries, key=lambda e: e[0]):
+        running += value
+        if crossed_on is None and running > limit_amount:
+            crossed_on, crossed_no = entry_date, voucher_no
+    status = classify_absolute_limit(running, limit_amount, approaching_pct)
+    if status != AbsoluteLimitStatus.CROSSED:
+        crossed_on = crossed_no = None
+    return LimitCheck(status, running, crossed_on, crossed_no)
+
+
+_CRITICAL = {
+    BandStatus.SIGNIFICANT_INCREASE.value,
+    BandStatus.SIGNIFICANT_DECREASE.value,
+}
+_CRITICAL.add(AbsoluteLimitStatus.CROSSED.value)
+_WARNING = {BandStatus.MODERATE_INCREASE.value, BandStatus.MODERATE_DECREASE.value}
+_WARNING.add(AbsoluteLimitStatus.APPROACHING.value)
+
+
+def severity_for_status(status: str) -> str:
+    """'critical' (red), 'warning' (amber) or 'info' (green / back to normal)."""
+    if status in _CRITICAL:
+        return "critical"
+    if status in _WARNING:
+        return "warning"
+    return "info"
+
+
+def statuses_for_severity(severity: str) -> list[str]:
+    all_statuses = [s.value for s in BandStatus] + [s.value for s in AbsoluteLimitStatus]
+    return [s for s in all_statuses if severity_for_status(s) == severity]
+
+
 NotifyFn = Callable[[AlertEvent], None]
+
+# Extra delivery channels (email / WhatsApp) register here; in-app alerts are
+# always stored by the caller regardless.
+NOTIFIERS: list[NotifyFn] = []
 
 
 def notify(event: AlertEvent, channels: list[NotifyFn] | None = None) -> None:
@@ -138,5 +196,5 @@ def notify(event: AlertEvent, channels: list[NotifyFn] | None = None) -> None:
     email/WhatsApp channels can be appended to `channels` later without
     changing anything above this function.
     """
-    for channel in channels or []:
+    for channel in NOTIFIERS if channels is None else channels:
         channel(event)

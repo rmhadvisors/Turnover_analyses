@@ -3,12 +3,17 @@ from __future__ import annotations
 import enum
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.client import Client
+    from app.models.import_log import ImportLog
 
 
 class VoucherType(str, enum.Enum):
@@ -29,7 +34,8 @@ class Voucher(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), nullable=False)
     voucher_type: Mapped[VoucherType] = mapped_column(
-        SAEnum(VoucherType, values_callable=lambda e: [m.value for m in e]), nullable=False
+        SAEnum(VoucherType, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
     )
     voucher_date: Mapped[date] = mapped_column(Date, nullable=False)
     voucher_no: Mapped[str] = mapped_column(String(100), nullable=False)

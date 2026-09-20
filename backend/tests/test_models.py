@@ -47,15 +47,15 @@ def test_duplicate_voucher_is_rejected_by_unique_constraint(db_session) -> None:
     db_session.add(client)
     db_session.commit()
 
-    voucher_kwargs = dict(
-        client_id=client.id,
-        voucher_type=VoucherType.SALES,
-        voucher_date=date(2025, 6, 1),
-        voucher_no="S-101",
-        total_value=Decimal("50000.00"),
-        fy="2025-26",
-        dedup_key="sales|S-101|2025-06-01|50000.00",
-    )
+    voucher_kwargs = {
+        "client_id": client.id,
+        "voucher_type": VoucherType.SALES,
+        "voucher_date": date(2025, 6, 1),
+        "voucher_no": "S-101",
+        "total_value": Decimal("50000.00"),
+        "fy": "2025-26",
+        "dedup_key": "sales|S-101|2025-06-01|50000.00",
+    }
     db_session.add(Voucher(**voucher_kwargs))
     db_session.commit()
 

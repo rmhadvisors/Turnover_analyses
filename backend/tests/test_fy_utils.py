@@ -66,3 +66,19 @@ def test_same_period_previous_fy_matches_months() -> None:
 def test_period_label() -> None:
     period = ytd_period("2025-26", date(2025, 8, 20))
     assert period_label(period) == "Apr-Aug"
+
+
+def test_is_valid_fy() -> None:
+    from app.services.fy_utils import is_valid_fy
+
+    assert is_valid_fy("2024-25") and is_valid_fy("2099-00")
+    for bad in ("2024-26", "2024/25", "24-25", "2024-2025", "abcd-ef", ""):
+        assert not is_valid_fy(bad)
+
+
+def test_ytd_window_pair_is_month_aligned() -> None:
+    from app.services.fy_utils import ytd_window_pair
+
+    current, previous = ytd_window_pair("2025-26", date(2025, 8, 20))
+    assert (current.start, current.end) == (date(2025, 4, 1), date(2025, 8, 31))
+    assert (previous.start, previous.end) == (date(2024, 4, 1), date(2024, 8, 31))

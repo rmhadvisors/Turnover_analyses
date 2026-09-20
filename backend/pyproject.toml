@@ -1,9 +1,24 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
 
 [tool.black]
 line-length = 100
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
+ignore = ["E501"]  # line length is black's job
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+]
