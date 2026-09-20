@@ -41,3 +41,19 @@ class ComparisonRead(BaseModel):
     rows: list[MetricRowRead]
     limits: list[LimitResultRead]
     notes: list[str]
+
+
+class SummaryRow(BaseModel):
+    client_id: int
+    client_name: str
+    fy: str
+    is_ytd: bool
+    previous_turnover: Decimal | None
+    current_turnover: Decimal | None
+    change_pct: Decimal | None
+    band: str | None
+    status_label: str
+    net_profit_flag: str | None  # turned_to_loss / turned_to_profit
+    limits_crossed: int
+    limits_approaching: int
+    open_alerts: int

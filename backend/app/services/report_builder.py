@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from app.schemas.reports import ComparisonRead, LimitResultRead, MetricRowRead
+from app.schemas.reports import ComparisonRead, LimitResultRead, MetricRowRead, SummaryRow
 from app.services.alert_engine import BAND_DISPLAY, AbsoluteLimitStatus
 from app.services.comparison_service import ClientComparison, LimitResult, MetricRow
 
@@ -81,4 +81,26 @@ def comparison_to_read(comparison: ClientComparison) -> ComparisonRead:
         rows=[_metric_row(r) for r in comparison.rows],
         limits=[_limit_row(x) for x in comparison.limits],
         notes=comparison.notes,
+    )
+
+
+def summary_row(comparison: ClientComparison, open_alerts: int) -> SummaryRow:
+    """One line of the all-clients summary, built from the client's comparison."""
+    turnover = next(_metric_row(r) for r in comparison.rows if r.key == "turnover")
+    net_profit = next(r for r in comparison.rows if r.key == "net_profit")
+    statuses = [x.status for x in comparison.limits]
+    return SummaryRow(
+        client_id=comparison.client_id,
+        client_name=comparison.client_name,
+        fy=comparison.fy,
+        is_ytd=comparison.is_ytd,
+        previous_turnover=turnover.previous,
+        current_turnover=turnover.current,
+        change_pct=turnover.change_pct,
+        band=turnover.band,
+        status_label=turnover.status_label,
+        net_profit_flag=net_profit.comparison.sign_change if net_profit.comparison else None,
+        limits_crossed=statuses.count(AbsoluteLimitStatus.CROSSED),
+        limits_approaching=statuses.count(AbsoluteLimitStatus.APPROACHING),
+        open_alerts=open_alerts,
     )

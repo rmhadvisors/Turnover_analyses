@@ -2,3 +2,4 @@ streamlit>=1.39
 httpx>=0.27
 pandas>=2.2
 plotly>=5.24
+python-dotenv>=1.0

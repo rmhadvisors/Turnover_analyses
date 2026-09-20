@@ -215,3 +215,20 @@ def test_gst_setting_switches_turnover_to_gross(api) -> None:
     assert api.post("/imports/confirm", data=data, files=files).status_code == 200
     figures = api.get(f"/entries/{client_id}").json()
     assert Decimal(figures[0]["turnover"]) == Decimal("1180.00")
+
+
+def test_summary_and_fy_list(api, sample_dir) -> None:
+    sharma = make_client(api, "Sharma Traders")
+    quiet = make_client(api, "No Data Yet")
+    upload(api, sample_dir / "sharma_traders_sales_register.xlsx", sharma, "sales_register")
+
+    assert "2025-26" in api.get("/reports/fys").json()
+    rows = {
+        r["client_name"]: r for r in api.get("/reports/summary", params={"fy": "2025-26"}).json()
+    }
+    assert rows["Sharma Traders"]["status_label"] == "Significant Increase"
+    assert Decimal(rows["Sharma Traders"]["change_pct"]) == Decimal("25.00")
+    assert rows["Sharma Traders"]["open_alerts"] > 0
+    assert rows["No Data Yet"]["status_label"] == "New / No comparison"
+    assert rows["No Data Yet"]["open_alerts"] == 0 and quiet
+    assert api.get("/reports/summary", params={"fy": "bad"}).status_code == 422
