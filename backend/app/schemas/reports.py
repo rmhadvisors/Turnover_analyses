@@ -57,3 +57,18 @@ class SummaryRow(BaseModel):
     limits_crossed: int
     limits_approaching: int
     open_alerts: int
+
+
+class MonthlySeriesRead(BaseModel):
+    fy: str
+    sales: list[Decimal]
+    purchases: list[Decimal]
+
+
+class MonthlyRead(BaseModel):
+    client_id: int
+    client_name: str
+    months: list[str]
+    current: MonthlySeriesRead
+    previous: MonthlySeriesRead
+    has_data: bool

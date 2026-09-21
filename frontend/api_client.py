@@ -216,3 +216,31 @@ def acknowledge_alert(alert_id: int, by: str) -> dict:
 
 def recheck_all() -> int:
     return _request("POST", "/alerts/recheck")["alerts_raised"]
+
+
+# ------------------------------------------------------------ chart + exports
+
+
+def monthly(client_id: int, fy: str) -> dict:
+    return _request("GET", f"/reports/monthly/{client_id}", params={"fy": fy})
+
+
+def _download(path: str, params: dict) -> bytes:
+    try:
+        response = httpx.get(f"{BACKEND_URL}{path}", params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    except httpx.HTTPError as exc:
+        raise ApiError(
+            f"Cannot reach the backend at {BACKEND_URL}. ({exc.__class__.__name__})"
+        ) from exc
+    if response.status_code >= 400:
+        raise ApiError(_detail(response))
+    return response.content
+
+
+def export_report(client_id: int, fy: str, fmt: str, unit: str) -> bytes:
+    """The client comparison report as .xlsx or .pdf bytes."""
+    return _download(f"/reports/export/{client_id}", {"fy": fy, "format": fmt, "unit": unit})
+
+
+def export_summary(fy: str, unit: str) -> bytes:
+    return _download("/reports/summary/export", {"fy": fy, "unit": unit})

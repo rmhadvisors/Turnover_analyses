@@ -42,9 +42,14 @@ def format_money(value: Decimal | None, unit: str = "auto") -> str:
         return "—"
     if unit == "full":
         return format_full(value)
-    if unit == "crores" or (unit == "auto" and abs(value) >= CRORE):
-        return f"₹{(value / CRORE).quantize(Decimal('0.01'))} Cr"
-    return f"₹{(value / LAKH).quantize(Decimal('0.01'))} L"
+    divisor, suffix = (
+        (CRORE, "Cr")
+        if unit == "crores" or (unit == "auto" and abs(value) >= CRORE)
+        else (LAKH, "L")
+    )
+    scaled = abs(value / divisor).quantize(Decimal("0.01"))
+    sign = "-" if value < 0 and scaled != 0 else ""
+    return f"{sign}₹{scaled} {suffix}"
 
 
 def format_pct(value: Decimal | None) -> str:

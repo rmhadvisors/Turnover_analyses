@@ -31,14 +31,20 @@ def format_indian_commas(value: Decimal) -> str:
     return f"-{result}" if negative else result
 
 
+def _scaled(value: Decimal, unit: Decimal, suffix: str) -> str:
+    scaled = abs(value / unit).quantize(Decimal("0.01"))
+    sign = "-" if value < 0 and scaled != 0 else ""
+    return f"{sign}₹{scaled} {suffix}"
+
+
 def format_lakhs(value: Decimal) -> str:
-    """Value expressed in lakhs, e.g. 8000000 -> '₹80.00 L'."""
-    return f"₹{(value / LAKH).quantize(Decimal('0.01'))} L"
+    """Value expressed in lakhs, e.g. 8000000 -> '₹80.00 L' (negatives: '-₹2.00 L')."""
+    return _scaled(value, LAKH, "L")
 
 
 def format_crores(value: Decimal) -> str:
     """Value expressed in crores, e.g. 10000000 -> '₹1.00 Cr'."""
-    return f"₹{(value / CRORE).quantize(Decimal('0.01'))} Cr"
+    return _scaled(value, CRORE, "Cr")
 
 
 def format_indian(value: Decimal, unit: str = "auto") -> str:

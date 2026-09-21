@@ -57,3 +57,10 @@ st.dataframe(
     hide_index=True,
     column_config={"Change %": st.column_config.NumberColumn(format="%.2f%%")},
 )
+
+st.download_button(
+    "⬇️ Download summary (Excel)",
+    data=lambda: api.export_summary(fy, unit()),
+    file_name=f"Turnover_Summary_FY{fy}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)

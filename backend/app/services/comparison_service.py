@@ -36,6 +36,7 @@ from app.services.turnover import (
     SALES_TYPES,
     VoucherAmount,
     limit_entries,
+    monthly_series,
     net_purchases,
     net_sales,
 )
@@ -186,3 +187,44 @@ def build_comparison(
 
     limits = _limit_results(db, client.id, fy, as_of, include_gst, cur)
     return ClientComparison(client.id, client.name, fy, prev_fy, is_ytd, label, rows, limits, notes)
+
+
+MONTH_LABELS = ("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar")
+
+
+@dataclass
+class MonthlySeries:
+    fy: str
+    sales: list[Decimal]  # Apr..Mar, net of credit notes
+    purchases: list[Decimal]  # Apr..Mar, net of debit notes
+
+
+@dataclass
+class MonthlyComparison:
+    client_id: int
+    client_name: str
+    months: tuple[str, ...]
+    current: MonthlySeries
+    previous: MonthlySeries
+    has_data: bool
+
+
+def _fy_months(fy: str) -> list[tuple[int, int]]:
+    start = int(fy[:4])
+    return [(start, m) for m in range(4, 13)] + [(start + 1, m) for m in (1, 2, 3)]
+
+
+def _series(db: Session, client_id: int, fy: str, include_gst: bool) -> MonthlySeries:
+    by_month = monthly_series(voucher_repo.amounts_for_fy(db, client_id, fy), include_gst)
+    zero = (Decimal(0), Decimal(0))
+    pairs = [by_month.get(key, zero) for key in _fy_months(fy)]
+    return MonthlySeries(fy, [p[0] for p in pairs], [p[1] for p in pairs])
+
+
+def build_monthly(db: Session, client: Client, fy: str) -> MonthlyComparison:
+    """Month-wise net sales and purchases for `fy` and the previous FY (from vouchers)."""
+    include_gst = threshold_repo.get_settings(db).include_gst_in_turnover
+    current = _series(db, client.id, fy, include_gst)
+    previous = _series(db, client.id, previous_fy(fy), include_gst)
+    has_data = any(v for s in (current, previous) for v in s.sales + s.purchases)
+    return MonthlyComparison(client.id, client.name, MONTH_LABELS, current, previous, has_data)

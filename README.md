@@ -104,7 +104,26 @@ Open **Settings / Thresholds**.
 Saving a change re-checks every client. Alerts are recorded only when a status *changes*, so
 re-importing does not repeat them.
 
+## Reports and exports
+
+**Client Report** (screen) shows the comparison table, absolute-limit alerts, a month-wise sales vs
+purchases chart for the current and previous FY (shared axis, with a table view), and the client's
+alerts. Choose the amount unit (auto / lakhs / crores / full Indian commas) in the sidebar.
+
+- **Excel (.xlsx)**: numbers are real numeric cells with number formats (`₹80.00 L`, `0.00%`, an
+  arrow shown by the format itself), not text, so they can be sorted and summed. A second sheet
+  holds the month-wise table with two native Excel charts. The Difference column keeps its sign;
+  the format shows ↑ / ↓.
+- **PDF**: the same table, limit alerts and both charts on a landscape A4 page.
+- **Summary** (all clients) has its own Excel download, sorted by size of turnover change, with
+  filters on every column.
+
+The PDF uses the bundled DejaVu Sans font (`backend/app/assets/fonts/`, licence included) because
+the standard PDF fonts have no ₹ sign.
+
 ## Status
 
-Stages 1-4 are complete (skeleton, data model + calculations, Tally import + API, Streamlit
-screens). Month-wise chart and Excel / PDF export are the remaining stage (5).
+All five stages are complete: skeleton, data model + calculations, Tally import + API, Streamlit
+screens, reports and exports. Not built (by design): e-mail / WhatsApp delivery of alerts (the
+`notify()` hook in `backend/app/services/alert_engine.py` is where channels plug in) and Tally XML
+import (register a reader in `tally_importer.READERS`).

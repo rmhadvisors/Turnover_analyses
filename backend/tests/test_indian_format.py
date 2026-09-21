@@ -42,3 +42,10 @@ def test_format_indian_auto_picks_crores_above_one_crore() -> None:
 
 def test_format_indian_auto_picks_lakhs_below_one_crore() -> None:
     assert format_indian(Decimal(8000000), unit="auto") == "₹80.00 L"
+
+
+def test_negative_lakhs_and_crores_put_the_sign_before_the_rupee_symbol() -> None:
+    assert format_lakhs(Decimal(-200000)) == "-₹2.00 L"
+    assert format_crores(Decimal(-15000000)) == "-₹1.50 Cr"
+    assert format_indian(Decimal(-15000000)) == "-₹1.50 Cr"
+    assert format_lakhs(Decimal("-0.4")) == "₹0.00 L"  # rounds to zero: no stray minus
