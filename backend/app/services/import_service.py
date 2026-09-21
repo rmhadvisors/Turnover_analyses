@@ -12,11 +12,11 @@ from app.services.recheck_service import evaluate_client
 from app.services.turnover import PURCHASE_TYPES, SALES_TYPES, net_purchases, net_sales
 
 
-def _period_text(start: date, end: date) -> str:
+def period_text(start: date, end: date) -> str:
     return f"{start:%d-%b-%Y} to {end:%d-%b-%Y}"
 
 
-def _dedupe(db: Session, client_id: int, vouchers: list[ti.ParsedVoucher]):
+def dedupe(db: Session, client_id: int, vouchers: list[ti.ParsedVoucher]):
     """Split parsed vouchers into (new, duplicate_count) against the database and
     against repeats inside the same file."""
     seen = voucher_repo.existing_dedup_keys(db, client_id)
@@ -82,7 +82,7 @@ def preview_file(
     except ti.ImportFormatError as exc:
         result["error"] = str(exc)
         return result
-    fresh, duplicates = _dedupe(db, client_id, parsed.vouchers)
+    fresh, duplicates = dedupe(db, client_id, parsed.vouchers)
     result.update(
         rows_found=len(parsed.vouchers),
         would_import=len(fresh),
@@ -90,7 +90,7 @@ def preview_file(
         invalid=parsed.invalid[:20],
         invalid_count=len(parsed.invalid),
         totals_ignored=parsed.totals_ignored,
-        period=_period_text(*parsed.period) if parsed.period else None,
+        period=period_text(*parsed.period) if parsed.period else None,
         parsed_sample=[
             {
                 "date": v.voucher_date,
@@ -144,7 +144,7 @@ def import_file(
     parsed = ti.parse_vouchers(rows, header_index, used, report_type)
 
     duplicate_file = import_repo.file_already_imported(db, client_id, report_type, digest)
-    fresh, duplicates = _dedupe(db, client_id, parsed.vouchers)
+    fresh, duplicates = dedupe(db, client_id, parsed.vouchers)
     period = parsed.period
     if period is None and parsed.vouchers:
         dates = [v.voucher_date for v in parsed.vouchers]
@@ -154,7 +154,7 @@ def import_file(
         client_id=client_id,
         file_name=filename,
         report_type=report_type,
-        period=_period_text(*period) if period else None,
+        period=period_text(*period) if period else None,
         file_hash=digest,
         rows_imported=len(fresh),
         rows_skipped=duplicates + len(parsed.invalid),

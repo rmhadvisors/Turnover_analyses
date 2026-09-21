@@ -59,3 +59,45 @@ class ImportLogRead(BaseModel):
 
 class MappingBody(BaseModel):
     mapping: dict[str, MappingValue]
+
+
+class JsonFileInfo(BaseModel):
+    file_name: str
+    kind: str  # master | transactions
+    records: int
+    truncated: bool
+
+
+class JsonFyTotals(BaseModel):
+    fy: str
+    sales: Decimal
+    purchases: Decimal
+    sales_count: int
+    purchase_count: int
+
+
+class JsonSummary(BaseModel):
+    files: list[JsonFileInfo]
+    period: str | None
+    company_gstins: list[str]
+    vouchers_read: int
+    excluded: dict[str, int]
+    other_vouchers: int
+    sales_records: int
+    purchase_records: int
+    by_fy: list[JsonFyTotals]
+    warnings: list[str]
+
+
+class JsonPreview(JsonSummary):
+    would_import: int
+    duplicates: int
+    sample: list[dict[str, Any]]
+
+
+class JsonImportResult(JsonSummary):
+    imported: int
+    duplicates_skipped: int
+    import_log_ids: list[int]
+    fys_affected: list[str]
+    alerts_raised: int

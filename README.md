@@ -78,6 +78,26 @@ ignored), skips blank and Total / Grand Total rows, and understands Indian comma
 (`1,00,00,000`), `Dr` / `Cr` suffixes, bracketed negatives and `dd-mm-yyyy` / `d-MMM-yy` dates.
 You confirm the column mapping once per client and report type; it is saved and reused.
 
+### Tally JSON export (Master + Transactions)
+
+Tally can also export **JSON**. On the **Import Tally Data** screen choose *Tally JSON export*, pick
+the client, and select the **Master** file and the **Transactions** file together (both from the
+same company; the order does not matter). The tool then:
+
+- reads the Master to learn which ledgers belong to *Sales Accounts*, *Purchase Accounts* and
+  *Duties & Taxes*, and computes turnover the way Tally does (sales and purchases are the group
+  totals; credit notes and debit notes reduce them; custom voucher types such as "Purchase New"
+  work because the ledger, not the voucher name, decides);
+- leaves out deleted, cancelled, void and optional (unposted) vouchers;
+- does **not** count freight, TCS, round-off or state VAT booked in other groups;
+- tells you in plain words about anything odd: an export that was cut off part-way (every complete
+  voucher before the cut is still used), a period shorter than a year, ledgers missing from the
+  Master, vouchers that do not balance.
+
+The export does not name the company, only its GST number: name the client yourself. Profit
+figures are not in these files, so Gross / Net Profit stay empty (enter them manually, or import a
+Profit & Loss file).
+
 ## How the numbers work
 
 - Turnover = taxable value excluding GST (switch to gross in **Settings**), less credit notes;

@@ -5,8 +5,15 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.repositories import client_repo, import_repo
-from app.schemas.imports import ImportLogRead, ImportPreview, ImportResult, MappingBody
-from app.services import import_service
+from app.schemas.imports import (
+    ImportLogRead,
+    ImportPreview,
+    ImportResult,
+    JsonImportResult,
+    JsonPreview,
+    MappingBody,
+)
+from app.services import import_json_service, import_service
 from app.services.fy_utils import is_valid_fy
 from app.services.tally_importer import REPORT_TYPES, ImportFormatError
 
@@ -104,3 +111,37 @@ def save_mapping(
     import_repo.save_mapping(db, client_id, report_type, body.mapping)
     db.commit()
     return body
+
+
+async def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    return [(f.filename or "upload.json", await f.read()) for f in files]
+
+
+@router.post("/tally-json/preview", response_model=JsonPreview)
+async def preview_tally_json(
+    client_id: int = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """Dry run for Tally's JSON export: send the Master and Transactions files together."""
+    if client_repo.get_client(db, client_id) is None:
+        raise HTTPException(404, "Client not found")
+    try:
+        return import_json_service.preview_json(db, client_id, await _read_uploads(files))
+    except ImportFormatError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/tally-json/confirm", response_model=JsonImportResult)
+async def confirm_tally_json(
+    client_id: int = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """Import Tally's JSON export (sales and purchases), skipping vouchers already imported."""
+    if client_repo.get_client(db, client_id) is None:
+        raise HTTPException(404, "Client not found")
+    try:
+        return import_json_service.import_json(db, client_id, await _read_uploads(files))
+    except ImportFormatError as exc:
+        raise HTTPException(422, str(exc)) from exc

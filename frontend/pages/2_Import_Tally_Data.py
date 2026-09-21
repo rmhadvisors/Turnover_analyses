@@ -3,11 +3,13 @@ import streamlit as st
 
 import api_client as api
 from components.common import page_link, page_setup, select_client, show_error, unit
+from components.json_import import render_json_import, show_import_log
 from components.money import format_money
 
 page_setup("Import Tally Data", "📥")
 
 REPORT_TYPES = {
+    "Tally JSON export (Master + Transactions files)": "tally_json",
     "Sales Register": "sales_register",
     "Purchase Register": "purchase_register",
     "Profit & Loss / Trial Balance summary": "profit_loss",
@@ -28,6 +30,12 @@ if not client:
 
 report_label = st.radio("Report type", list(REPORT_TYPES), horizontal=True)
 report_type = REPORT_TYPES[report_label]
+
+if report_type == "tally_json":
+    render_json_import(client)
+    show_import_log(client["id"])
+    st.stop()
+
 uploaded = st.file_uploader("Tally export", type=["xlsx", "xls", "csv"])
 st.caption(
     "Export from Tally as Excel or CSV. Header rows above the table and Grand Total rows are handled."
@@ -159,13 +167,4 @@ if st.button("Confirm import", type="primary", disabled=not can_import):
             )
         page_link("pages/5_Client_Report.py", "Open the client report →")
 
-st.divider()
-st.subheader("Import log")
-log = api.import_log(client["id"])
-if log:
-    frame = pd.DataFrame(log)[
-        ["imported_at", "file_name", "report_type", "period", "rows_imported", "rows_skipped"]
-    ]
-    st.dataframe(frame, width="stretch", hide_index=True)
-else:
-    st.caption("No imports yet for this client.")
+show_import_log(client["id"])

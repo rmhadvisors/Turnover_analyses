@@ -10,3 +10,6 @@ env/
 .ruff_cache/
 *.egg-info/
 .streamlit/
+
+# real client exports (confidential) - never commit
+sample_data/real/

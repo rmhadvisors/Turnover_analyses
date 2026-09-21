@@ -244,3 +244,20 @@ def export_report(client_id: int, fy: str, fmt: str, unit: str) -> bytes:
 
 def export_summary(fy: str, unit: str) -> bytes:
     return _download("/reports/summary/export", {"fy": fy, "unit": unit})
+
+
+# ------------------------------------------------------- Tally JSON export
+
+
+def _upload_json(path: str, client_id: int, files: list[tuple[str, bytes]]) -> dict:
+    parts = [("files", (name, content)) for name, content in files]
+    return _request("POST", path, data={"client_id": str(client_id)}, files=parts)
+
+
+def preview_tally_json(client_id: int, files: list[tuple[str, bytes]]) -> dict:
+    """Dry run for a Tally JSON export (Master + Transactions files sent together)."""
+    return _upload_json("/imports/tally-json/preview", client_id, files)
+
+
+def confirm_tally_json(client_id: int, files: list[tuple[str, bytes]]) -> dict:
+    return _upload_json("/imports/tally-json/confirm", client_id, files)
