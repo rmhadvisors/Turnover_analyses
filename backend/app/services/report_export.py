@@ -126,6 +126,8 @@ def _comparison_sheet(ws, report: ClientComparison, unit: str) -> None:
     title = f"TURNOVER COMPARISON – FY {report.fy}"
     if report.is_ytd:
         title += f" (YTD {report.period_label})"
+    elif report.is_period_matched:
+        title += f" (Comparison for {report.period_label})"
     _text(ws, "A1", title, Font(bold=True, size=14))
     _text(ws, "A2", f"Client: {report.client_name}", Font(bold=True))
     unit_note = {"auto": "lakhs / crores", "lakhs": "lakhs", "crores": "crores", "full": "rupees"}

@@ -37,6 +37,7 @@ class ComparisonRead(BaseModel):
     fy: str
     previous_fy: str
     is_ytd: bool
+    is_period_matched: bool
     period_label: str | None
     rows: list[MetricRowRead]
     limits: list[LimitResultRead]

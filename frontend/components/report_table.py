@@ -41,6 +41,8 @@ def render_comparison(report: dict, unit: str = "auto") -> None:
     heading = f"TURNOVER COMPARISON – FY {report['fy']}"
     if report["is_ytd"]:
         heading += f" (YTD {report['period_label']})"
+    elif report.get("is_period_matched"):
+        heading += f" (Comparison for {report['period_label']})"
     st.subheader(heading)
     st.markdown(f"**Client:** {escape(report['client_name'])}")
 

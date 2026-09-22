@@ -13,3 +13,5 @@ env/
 
 # real client exports (confidential) - never commit
 sample_data/real/
+backups/
+exports/

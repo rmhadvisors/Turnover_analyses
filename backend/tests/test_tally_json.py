@@ -282,3 +282,47 @@ def test_api_rejects_missing_master_missing_transactions_and_junk(api) -> None:
     assert upload_json(api, client_id, [master, junk]).status_code == 422
     assert upload_json(api, client_id, [("bad.json", b"not json at all")]).status_code == 422
     assert upload_json(api, 999, [master, transactions]).status_code == 404
+
+
+def test_blank_voucher_number_disambiguated_by_party_not_merged() -> None:
+    """Two different cash customers paying the same round amount on the same day
+    must not collide, even though their voucher numbers are both blank."""
+    a = voucher("Sales", "", 1, [entry("Alpha Traders", -100, True), entry("Sales 18%", 100)])
+    b = voucher("Sales", "", 1, [entry("Beta Traders", -100, True), entry("Sales 18%", 100)])
+    result = parse([a, b])
+    assert len(result.vouchers) == 2
+    assert len({v.dedup_key for v in result.vouchers}) == 2
+
+
+def test_blank_voucher_number_same_party_still_dedupes_on_reimport() -> None:
+    a = voucher("Sales", "", 1, [entry("Alpha Traders", -100, True), entry("Sales 18%", 100)])
+    again = voucher("Sales", "", 1, [entry("Alpha Traders", -100, True), entry("Sales 18%", 100)])
+    result = parse([a, again])
+    assert len({v.dedup_key for v in result.vouchers}) == 1
+
+
+def test_guid_reused_across_periods_does_not_leak_into_the_dedup_key() -> None:
+    """Tally's JSON guid suffix is a per-period internal sequence number and can
+    name two unrelated vouchers in *different* period exports (each parsed in its
+    own call, as the importer always does - one company+year per import). The
+    stored dedup_key must not collide just because the raw guid was reused."""
+    shared_guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-00000001"
+    a = voucher("Sales", "S-1", 1, [entry("Alpha", -100, True), entry("Sales 18%", 100)])
+    b = voucher("Sales", "S-2", 2, [entry("Beta", -200, True), entry("Sales 18%", 200)])
+    a["guid"] = b["guid"] = shared_guid
+    key_a = parse([a]).vouchers[0].dedup_key  # simulates the 24-25 import call
+    key_b = parse([b]).vouchers[0].dedup_key  # simulates the separate 25-26 import call
+    assert key_a != key_b
+
+
+def test_same_guid_within_one_call_is_still_treated_as_a_repeat() -> None:
+    """Within a single call (one company + one year, matching how the importer is
+    actually used), a repeated guid is still trusted as 'the same voucher again' -
+    this is the multi-file same-period merge STEP 3 asks for."""
+    shared_guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-00000001"
+    a = voucher("Sales", "S-1", 1, [entry("Alpha", -100, True), entry("Sales 18%", 100)])
+    b = voucher("Sales", "S-2", 2, [entry("Beta", -200, True), entry("Sales 18%", 200)])
+    a["guid"] = b["guid"] = shared_guid
+    result = parse([a, b])
+    assert len(result.vouchers) == 1
+    assert result.duplicate_guid_vouchers == 1

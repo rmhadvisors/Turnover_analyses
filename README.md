@@ -80,23 +80,46 @@ You confirm the column mapping once per client and report type; it is saved and 
 
 ### Tally JSON export (Master + Transactions)
 
-Tally can also export **JSON**. On the **Import Tally Data** screen choose *Tally JSON export*, pick
-the client, and select the **Master** file and the **Transactions** file together (both from the
-same company; the order does not matter). The tool then:
+Tally can also export **JSON** - this is the format that handles large full-year data most
+reliably, and the one to use if the Excel/CSV registers are unwieldy for a busy client.
+
+**Exporting from Tally:**
+
+1. Open the company, press **Alt+F2** and set the period to the full financial year
+   (1 April to 31 March).
+2. Export the **Masters** (ledgers and groups) as JSON, and the **Transactions** (vouchers) as
+   JSON, for that same period. Keep both files - the importer needs both.
+3. **If a full-year export fails, is very slow, or comes out truncated** (Tally can struggle with
+   a very large single export), export **quarter by quarter** instead (Apr-Jun, Jul-Sep, Oct-Dec,
+   Jan-Mar) and keep all four Transactions files. The importer accepts several Transactions files
+   for the same company and year at once - select the Master plus all four quarterly files
+   together on the Import screen, and it merges and de-duplicates them automatically (a voucher
+   that ends up in two of the files is only counted once).
+
+**On the Import Tally Data screen**, choose *Tally JSON export*, pick the client, and select the
+Master file (or files) and the Transactions file (or files) together - all from the same company
+and year; the order does not matter. The tool then:
 
 - reads the Master to learn which ledgers belong to *Sales Accounts*, *Purchase Accounts* and
-  *Duties & Taxes*, and computes turnover the way Tally does (sales and purchases are the group
-  totals; credit notes and debit notes reduce them; custom voucher types such as "Purchase New"
-  work because the ledger, not the voucher name, decides);
+  *Duties & Taxes* (matched ignoring case and stray spaces, so "Sales GST @ 18%" and
+  "SALES GST @ 18%" are the same ledger), and computes turnover the way Tally does (sales and
+  purchases are the group totals; credit notes and debit notes reduce them; custom voucher types
+  such as "Purchase New" work because the ledger, not the voucher name, decides);
 - leaves out deleted, cancelled, void and optional (unposted) vouchers;
 - does **not** count freight, TCS, round-off or state VAT booked in other groups;
 - tells you in plain words about anything odd: an export that was cut off part-way (every complete
-  voucher before the cut is still used), a period shorter than a year, ledgers missing from the
-  Master, vouchers that do not balance.
+  voucher before the cut is still used), a period shorter than a year, ledgers used in vouchers but
+  missing from the Master (with how many lines and how much money that affects), vouchers that do
+  not balance.
 
 The export does not name the company, only its GST number: name the client yourself. Profit
 figures are not in these files, so Gross / Net Profit stay empty (enter them manually, or import a
 Profit & Loss file).
+
+A cut-off 24-25 export compared against a complete 25-26 year would understate the previous year
+and overstate growth, so when one year's data does not reach 31 March, the Client Report compares
+only the matching part of both years instead (labelled, for example, "Comparison for 01-Apr to
+05-Sep only") rather than a misleading part-year-vs-full-year figure.
 
 ## How the numbers work
 
@@ -109,6 +132,22 @@ Profit & Loss file).
   year (Apr-Aug vs Apr-Aug), labelled YTD, with an annualised projection.
 - Dr / Cr suffixes are read but do not flip signs; whether a voucher adds or deducts comes from
   its voucher type.
+
+## Reading reports and alerts
+
+- **Client Report**: pick a client and FY. The table shows Turnover, Purchases, Gross Profit and
+  Net Profit for that year and the previous one, with the difference, the change %, and a
+  coloured status (🟢 Normal, 🟡 Moderate, 🔴 Significant). Below it, any absolute-limit alert
+  (e.g. "Sales turnover crossed Tax audit u/s 44AB... on 14-Jan-2026 (voucher S-0090)") names the
+  date and voucher on which the limit was crossed. The chart underneath compares month-by-month
+  sales and purchases for the two years side by side.
+- **Summary**: one row per client, sorted by the size of the turnover change, so the biggest
+  movers are at the top - use this to see at a glance which clients need a closer look.
+- **Alerts**: every status change (e.g. Normal → Significant Increase, or Approaching → Crossed)
+  is logged here with the old and new status, filterable by client, financial year and severity.
+  An alert stays "open" until you tick Acknowledge; the sidebar badge counts open alerts across
+  all clients. Importing the same data again does not create repeat alerts - only an actual change
+  in status raises a new one.
 
 ## Changing thresholds
 
@@ -144,6 +183,12 @@ the standard PDF fonts have no ₹ sign.
 ## Status
 
 All five stages are complete: skeleton, data model + calculations, Tally import + API, Streamlit
-screens, reports and exports. Not built (by design): e-mail / WhatsApp delivery of alerts (the
-`notify()` hook in `backend/app/services/alert_engine.py` is where channels plug in) and Tally XML
-import (register a reader in `tally_importer.READERS`).
+screens, reports and exports; the JSON importer has also been checked against real client data for
+four companies across two financial years each. Not built (by design): e-mail / WhatsApp delivery
+of alerts (the `notify()` hook in `backend/app/services/alert_engine.py` is where channels plug
+in) and Tally XML import (register a reader in `tally_importer.READERS`).
+
+Real client files are never committed to this repository - `sample_data/real/`, `backups/` and
+`exports/` are all git-ignored. A CA using this tool with real client data should treat those
+folders, and the SQLite database file, the same way: keep them off any shared or public git
+remote.

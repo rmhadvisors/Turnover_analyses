@@ -129,7 +129,10 @@ def import_json(db: Session, client_id: int, files: list[tuple[str, bytes]]) -> 
     parsed = analysis.result.vouchers
     fresh, duplicates = dedupe(db, client_id, parsed)
     fresh_ids = {id(v) for v in fresh}  # identity, so in-file duplicates are never re-added
-    file_names = ", ".join(f["file_name"] for f in analysis.files)[:255]
+    file_names = ", ".join(f["file_name"] for f in analysis.files)
+    if analysis.result.truncated_files:
+        file_names += " [cut off]"
+    file_names = file_names[:255]
 
     log_ids: list[int] = []
     for register, is_side in (

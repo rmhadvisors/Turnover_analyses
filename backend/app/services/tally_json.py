@@ -51,6 +51,11 @@ def _clean(name: Any) -> str:
     return " ".join(str(name).split())
 
 
+def _key(name: Any) -> str:
+    """Case- and whitespace-insensitive lookup key ('Sales GST @ 18%' == 'SALES GST @ 18%')."""
+    return _clean(name).casefold()
+
+
 # ------------------------------------------------------------------- reading
 
 
@@ -119,25 +124,29 @@ def kind_of(records: list[dict]) -> str:
 
 @dataclass
 class Master:
-    ledger_parent: dict[str, str] = field(default_factory=dict)
-    group_parent: dict[str, str] = field(default_factory=dict)
+    """Ledger/group parent lookups, keyed case- and whitespace-insensitively so
+    'Sales GST @ 18%' in a voucher matches 'SALES GST @ 18%' in the Master."""
+
+    ledger_parent: dict[str, str] = field(default_factory=dict)  # _key(ledger) -> _key(group)
+    group_parent: dict[str, str] = field(default_factory=dict)  # _key(group) -> _key(group)
     _cache: dict[str, frozenset[str]] = field(default_factory=dict, repr=False)
 
     def ancestors(self, ledger: str) -> frozenset[str]:
-        """Every group above a ledger, nearest first-to-primary (cycle-safe)."""
-        if ledger in self._cache:
-            return self._cache[ledger]
+        """Every group above a ledger (as lookup keys), nearest-first (cycle-safe)."""
+        key = _key(ledger)
+        if key in self._cache:
+            return self._cache[key]
         chain: list[str] = []
-        group = self.ledger_parent.get(ledger)
+        group = self.ledger_parent.get(key)
         while group and group not in chain:
             chain.append(group)
             group = self.group_parent.get(group)
         result = frozenset(chain)
-        self._cache[ledger] = result
+        self._cache[key] = result
         return result
 
     def knows(self, ledger: str) -> bool:
-        return ledger in self.ledger_parent
+        return _key(ledger) in self.ledger_parent
 
 
 def _record_name(record: dict) -> str | None:
@@ -160,7 +169,7 @@ def build_master(record_files: list[RecordsFile]) -> Master:
             if not name or record_type not in ("Ledger", "Group"):
                 continue
             target = master.ledger_parent if record_type == "Ledger" else master.group_parent
-            target[name] = parent
+            target[_key(name)] = _key(parent)
     return master
 
 
@@ -185,14 +194,17 @@ def collect_entries(voucher: dict) -> tuple[list[Entry], int]:
         if depth > 4:
             return
         if isinstance(node, dict):
-            if "ledgername" in node and "amount" in node:
-                amount = parse_amount(node["amount"])
-                if amount is None:
-                    unreadable += 1
+            if "ledgername" in node:
+                if "amount" not in node:
+                    amount = Decimal(0)  # a ledger line with no amount key counts as zero
                 else:
-                    entries.append(
-                        Entry(_clean(node["ledgername"]), amount, node.get("ispartyledger") is True)
-                    )
+                    amount = parse_amount(node["amount"])
+                    if amount is None:
+                        unreadable += 1
+                        return
+                entries.append(
+                    Entry(_clean(node["ledgername"]), amount, node.get("ispartyledger") is True)
+                )
                 return
             for value in node.values():
                 if isinstance(value, (dict, list)):
@@ -205,13 +217,16 @@ def collect_entries(voucher: dict) -> tuple[list[Entry], int]:
     return entries, unreadable
 
 
+_SALES_KEY, _PURCHASE_KEY, _TAX_KEY = _key(SALES_GROUP), _key(PURCHASE_GROUP), _key(TAX_GROUP)
+
+
 def _ledger_kind(master: Master, ledger: str) -> str | None:
     ancestors = master.ancestors(ledger)
-    if SALES_GROUP in ancestors:
+    if _SALES_KEY in ancestors:
         return "sales"
-    if PURCHASE_GROUP in ancestors:
+    if _PURCHASE_KEY in ancestors:
         return "purchase"
-    if TAX_GROUP in ancestors:
+    if _TAX_KEY in ancestors:
         return "tax"
     if not master.knows(ledger) and _TAX_NAME.search(ledger):
         return "tax"
@@ -234,6 +249,10 @@ class JsonParseResult:
     other_vouchers: int = 0  # posted, but not sales / purchase (receipts, payments, contra ...)
     voucher_types: Counter = field(default_factory=Counter)
     unknown_ledgers: set[str] = field(default_factory=set)
+    unknown_ledger_lines: Counter = field(default_factory=Counter)  # ledger name -> line count
+    unknown_ledger_amounts: dict[str, Decimal] = field(
+        default_factory=dict
+    )  # ledger name -> total abs amount
     unreadable_amounts: int = 0
     undated: int = 0
     unbalanced: int = 0
@@ -242,10 +261,26 @@ class JsonParseResult:
     first_date: date | None = None
     last_date: date | None = None
     truncated_files: list[str] = field(default_factory=list)
+    excluded_cutoff_dates: set[date] = field(default_factory=set)
+    duplicate_guid_vouchers: int = 0  # same voucher present in more than one Transactions file
 
 
 def _quantize(value: Decimal) -> Decimal:
     return value.quantize(_TWO_PLACES)
+
+
+def _dedup_key(
+    voucher_type: str, number: str, when: date, gross: Decimal, party: str | None
+) -> str:
+    """type+number+date+amount, as for Excel/CSV imports - except a blank voucher
+    number (common on POS-style cash sales) also folds in the party name, since two
+    different customers can otherwise pay the same round amount on the same day and
+    collide. Tally's JSON `guid` is NOT used here: its numeric suffix is an internal
+    per-period object sequence that Tally reuses across separate period exports (the
+    same guid can name two unrelated vouchers in the 24-25 and 25-26 files), so it is
+    not a safe cross-file identity."""
+    effective_number = number or f"(blank)/{(party or '').strip().casefold()}"
+    return make_dedup_key(voucher_type, effective_number, when, gross)
 
 
 def _emit(
@@ -269,20 +304,39 @@ def _emit(
             tax_value=tax_value,
             total_value=gross,
             fy=fy_label(when),
-            dedup_key=make_dedup_key(voucher_type, number, when, gross),
+            dedup_key=_dedup_key(voucher_type, number, when, gross, party),
             source_row=position,
         )
     )
 
 
 def parse_transactions(record_files: list[RecordsFile], master: Master) -> JsonParseResult:
+    """Parse one or more Transactions files for the same company/period. When more than
+    one file is given (e.g. two overlapping exports), vouchers are merged and de-duplicated
+    by their Tally `guid` - a later file's copy of a voucher already seen is skipped."""
     result = JsonParseResult()
     result.truncated_files = [f.file_name for f in record_files if f.truncated]
     position = 0
+    seen_guids: set[str] = set()
     for file in record_files:
+        # A cut export may contain a few syntactically complete vouchers from
+        # its final day, while other vouchers from that same day are missing.
+        # Treat the entire terminal day as unreliable so comparisons never mix
+        # a partial day with a complete matching day in the other FY.
+        dates = [_voucher_date(record) for record in file.records]
+        cutoff_date = max((value for value in dates if value is not None), default=None)
+        has_prior_day = bool(
+            cutoff_date and any(value is not None and value < cutoff_date for value in dates)
+        )
         for voucher in file.records:
             if voucher.get("metadata", {}).get("type") != "Voucher":
                 continue
+            guid = voucher.get("guid")
+            if guid:
+                if guid in seen_guids:
+                    result.duplicate_guid_vouchers += 1
+                    continue
+                seen_guids.add(guid)
             position += 1
             result.total_vouchers += 1
             reason = next(
@@ -294,6 +348,9 @@ def parse_transactions(record_files: list[RecordsFile], master: Master) -> JsonP
             when = _voucher_date(voucher)
             if when is None:
                 result.undated += 1
+                continue
+            if file.truncated and has_prior_day and when == cutoff_date:
+                result.excluded_cutoff_dates.add(when)
                 continue
             result.voucher_types[str(voucher.get("vouchertypename"))] += 1
             if voucher.get("cmpgstin"):
@@ -310,6 +367,10 @@ def parse_transactions(record_files: list[RecordsFile], master: Master) -> JsonP
             for entry in entries:
                 if not master.knows(entry.ledger):
                     result.unknown_ledgers.add(entry.ledger)
+                    result.unknown_ledger_lines[entry.ledger] += 1
+                    result.unknown_ledger_amounts[entry.ledger] = result.unknown_ledger_amounts.get(
+                        entry.ledger, Decimal(0)
+                    ) + abs(entry.amount)
                 kind = _ledger_kind(master, entry.ledger)
                 if kind == "sales":
                     sales += entry.amount  # credit (+) is a sale
@@ -354,6 +415,12 @@ def describe_warnings(result: JsonParseResult, master: Master, kinds: dict[str, 
             f"Every complete voucher before the cut was read; the rest is missing. "
             f"Export it again from Tally to get everything."
         )
+    if result.excluded_cutoff_dates:
+        days = ", ".join(f"{day:%d-%b-%Y}" for day in sorted(result.excluded_cutoff_dates))
+        warnings.append(
+            f"All vouchers dated {days} were excluded because that is the cut-off day; "
+            "other vouchers from the same day may be missing."
+        )
     if result.total_vouchers == 0:
         warnings.append("The Transactions file contains no vouchers.")
     elif not result.vouchers:
@@ -369,10 +436,23 @@ def describe_warnings(result: JsonParseResult, master: Master, kinds: dict[str, 
     if result.excluded:
         parts = ", ".join(f"{count} {reason}" for reason, count in result.excluded.items())
         warnings.append(f"Left out (as Tally does): {parts}.")
-    if result.unknown_ledgers:
+    if result.duplicate_guid_vouchers:
         warnings.append(
-            f"{len(result.unknown_ledgers)} ledger(s) used in vouchers are not in the Master file, "
-            f"so they were treated as neither sales nor purchase nor GST."
+            f"{result.duplicate_guid_vouchers} voucher(s) appeared in more than one file and were "
+            f"only counted once."
+        )
+    if result.unknown_ledgers:
+        total_lines = sum(result.unknown_ledger_lines.values())
+        total_amount = sum(result.unknown_ledger_amounts.values(), Decimal(0))
+        top = sorted(result.unknown_ledger_lines.items(), key=lambda kv: -kv[1])[:5]
+        detail = "; ".join(
+            f"{name} ({count} line(s), ₹{result.unknown_ledger_amounts[name]:,.2f})"
+            for name, count in top
+        )
+        warnings.append(
+            f"{len(result.unknown_ledgers)} ledger(s) used in vouchers are not in the Master file "
+            f"({total_lines} line(s) totalling ₹{total_amount:,.2f}), so they were treated as "
+            f"neither sales nor purchase nor GST. Largest: {detail}."
         )
     if result.unbalanced:
         warnings.append(

@@ -15,7 +15,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.models import Client
-from app.repositories import figures_repo, threshold_repo, voucher_repo
+from app.repositories import figures_repo, import_repo, threshold_repo, voucher_repo
 from app.services.alert_engine import (
     AbsoluteLimitStatus,
     BandStatus,
@@ -25,6 +25,8 @@ from app.services.alert_engine import (
 )
 from app.services.calculations import MetricComparison, annualise, compare_metric
 from app.services.fy_utils import (
+    Period,
+    fy_bounds,
     is_fy_in_progress,
     months_elapsed_in_fy,
     period_label,
@@ -80,6 +82,7 @@ class ClientComparison:
     fy: str
     previous_fy: str
     is_ytd: bool
+    is_period_matched: bool
     period_label: str | None
     rows: list[MetricRow]
     limits: list[LimitResult]
@@ -115,6 +118,58 @@ def _apply_ytd_vouchers(
     if cur["gross_profit"] is not None or cur["net_profit"] is not None:
         notes.append("Profit figures are compared as entered/imported and are not period-matched.")
     return label, notes
+
+
+def _same_day_in_fy(value: date, fy: str) -> date:
+    """Put a calendar month/day into another financial year.
+
+    The source ranges are dates from consecutive financial years, so matching by
+    month/day (rather than a fixed number of days) also behaves correctly around
+    a leap February.
+    """
+    start_year = int(fy[:4]) if value.month >= 4 else int(fy[:4]) + 1
+    return date(start_year, value.month, value.day)
+
+
+def _matched_available_period(db: Session, client_id: int, fy: str) -> tuple[Period, Period] | None:
+    """Return the common observed window for two completed FY exports, if partial.
+
+    A historical file can be cut off even though its FY is no longer in progress.
+    In that case annual figures must not be compared with a part-year export.
+    """
+    previous = previous_fy(fy)
+    # Date ranges alone are not proof of an incomplete export: a perfectly
+    # valid register may simply have no voucher on the FY boundary.  Only
+    # activate historical period matching when the import audit recorded a
+    # cut-off JSON source for either compared FY.
+    years = (fy[:4], previous[:4])
+    cut_off = any(
+        "[cut off]" in log.file_name and log.period and any(year in log.period for year in years)
+        for log in import_repo.list_logs(db, client_id)
+    )
+    if not cut_off:
+        return None
+    current_rows = voucher_repo.amounts_for_fy(db, client_id, fy)
+    previous_rows = voucher_repo.amounts_for_fy(db, client_id, previous)
+    if not current_rows or not previous_rows:
+        return None
+    cur_start, cur_end = min(v.voucher_date for v in current_rows), max(
+        v.voucher_date for v in current_rows
+    )
+    prev_start, prev_end = min(v.voucher_date for v in previous_rows), max(
+        v.voucher_date for v in previous_rows
+    )
+    fy_start, fy_end = fy_bounds(fy)
+    start = max(_same_day_in_fy(cur_start, fy), _same_day_in_fy(prev_start, fy))
+    end = min(_same_day_in_fy(cur_end, fy), _same_day_in_fy(prev_end, fy))
+    if start > end or (start <= fy_start and end >= fy_end):
+        return None
+    prev_period = Period(_same_day_in_fy(start, previous), _same_day_in_fy(end, previous))
+    return Period(start, end), prev_period
+
+
+def _exact_period_label(period: Period) -> str:
+    return f"{period.start:%d-%b} to {period.end:%d-%b} only"
 
 
 def _limit_results(
@@ -167,9 +222,33 @@ def build_comparison(
     prev = _figure_values(figures_repo.get_figures(db, client.id, prev_fy))
 
     is_ytd = is_fy_in_progress(fy, as_of)
+    is_period_matched = False
     label, notes = None, []
     if is_ytd:
         label, notes = _apply_ytd_vouchers(db, client.id, fy, as_of, include_gst, cur, prev)
+    else:
+        matched = _matched_available_period(db, client.id, fy)
+        if matched:
+            current_period, previous_period = matched
+            current_vouchers = voucher_repo.amounts_for_range(
+                db, client.id, current_period.start, current_period.end
+            )
+            previous_vouchers = voucher_repo.amounts_for_range(
+                db, client.id, previous_period.start, previous_period.end
+            )
+            for key, types, total in (
+                ("turnover", SALES_TYPES, net_sales),
+                ("purchases", PURCHASE_TYPES, net_purchases),
+            ):
+                if _has_type(current_vouchers, types) or _has_type(previous_vouchers, types):
+                    cur[key] = total(current_vouchers, include_gst)
+                    prev[key] = total(previous_vouchers, include_gst)
+            is_period_matched = True
+            label = _exact_period_label(current_period)
+            notes.append(
+                f"Comparison for {label}; one or both historical exports are incomplete. "
+                "Sales and purchases use only the period covered in both years."
+            )
     months = months_elapsed_in_fy(fy, as_of)
 
     rows = []
@@ -186,7 +265,9 @@ def build_comparison(
         rows.append(MetricRow(key, name, prev[key], cur[key], comparison, band, projected))
 
     limits = _limit_results(db, client.id, fy, as_of, include_gst, cur)
-    return ClientComparison(client.id, client.name, fy, prev_fy, is_ytd, label, rows, limits, notes)
+    return ClientComparison(
+        client.id, client.name, fy, prev_fy, is_ytd, is_period_matched, label, rows, limits, notes
+    )
 
 
 MONTH_LABELS = ("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar")

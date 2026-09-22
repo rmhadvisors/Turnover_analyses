@@ -77,6 +77,7 @@ def comparison_to_read(comparison: ClientComparison) -> ComparisonRead:
         fy=comparison.fy,
         previous_fy=comparison.previous_fy,
         is_ytd=comparison.is_ytd,
+        is_period_matched=comparison.is_period_matched,
         period_label=comparison.period_label,
         rows=[_metric_row(r) for r in comparison.rows],
         limits=[_limit_row(x) for x in comparison.limits],
