@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models import Alert
-from app.services.alert_engine import AlertEvent, statuses_for_severity
+from app.services.alert_engine import (
+    ACTIONABLE,
+    AlertEvent,
+    severity_for_status,
+    statuses_for_severity,
+)
 
 
 def latest_status(db: Session, client_id: int, fy: str, metric: str) -> str | None:
@@ -54,8 +59,16 @@ def list_alerts(
     fy: str | None = None,
     severity: str | None = None,
     unacknowledged_only: bool = False,
+    kind: str | None = None,
+    section: str | None = None,
+    sort: str = "recent",
 ) -> list[Alert]:
-    query = select(Alert).order_by(Alert.triggered_at.desc(), Alert.id.desc())
+    """`sort`: 'recent' (newest first) or 'at_stake' (TDS money at stake, largest first)."""
+    query = (
+        select(Alert)
+        .options(joinedload(Alert.client))  # client name for every row, in the same query
+        .order_by(Alert.triggered_at.desc(), Alert.id.desc())
+    )
     if client_id is not None:
         query = query.where(Alert.client_id == client_id)
     if fy:
@@ -64,13 +77,33 @@ def list_alerts(
         query = query.where(Alert.new_status.in_(statuses_for_severity(severity)))
     if unacknowledged_only:
         query = query.where(Alert.acknowledged.is_(False))
+    if kind == "tds":
+        query = query.where(Alert.metric.startswith("tds:"))
+    elif kind == "turnover":
+        query = query.where(~Alert.metric.startswith("tds:"))
+    if section:
+        query = query.where(Alert.section == section)
+    if sort == "at_stake":
+        query = query.order_by(None).order_by(
+            Alert.money_at_stake.desc().nulls_last(), Alert.triggered_at.desc(), Alert.id.desc()
+        )
     return list(db.scalars(query))
 
 
+def latest_alert(db: Session, client_id: int, fy: str, metric: str) -> Alert | None:
+    query = (
+        select(Alert)
+        .where(Alert.client_id == client_id, Alert.fy == fy, Alert.metric == metric)
+        .order_by(Alert.id.desc())
+        .limit(1)
+    )
+    return db.scalar(query)
+
+
 def count_unacknowledged(db: Session) -> int:
-    """Badge count of unacknowledged critical/warning alerts ('back to normal'
+    """Badge count of unacknowledged critical/high/warning alerts ('back to normal'
     info alerts are recorded but are not actionable)."""
-    actionable = statuses_for_severity("critical") + statuses_for_severity("warning")
+    actionable = [s for level in ACTIONABLE for s in statuses_for_severity(level)]
     query = (
         select(func.count())
         .select_from(Alert)
@@ -79,9 +112,42 @@ def count_unacknowledged(db: Session) -> int:
     return db.scalar(query) or 0
 
 
-def acknowledge(db: Session, alert: Alert, by: str) -> Alert:
+def open_counts_by_client(db: Session, fy: str | None = None) -> dict[int, dict[str, int]]:
+    """Unacknowledged alerts per client and severity: {client_id: {"critical": n, ...}}."""
+    query = (
+        select(Alert.client_id, Alert.new_status, func.count())
+        .where(Alert.acknowledged.is_(False))
+        .group_by(Alert.client_id, Alert.new_status)
+    )
+    if fy:
+        query = query.where(Alert.fy == fy)
+    counts: dict[int, dict[str, int]] = {}
+    for client_id, status, count in db.execute(query):
+        row = counts.setdefault(client_id, {"critical": 0, "high": 0, "warning": 0, "info": 0})
+        row[severity_for_status(status)] += count
+    return counts
+
+
+def count_open_tds(db: Session, fy: str | None = None) -> dict[str, int]:
+    """Unacknowledged TDS alerts by severity (for the dashboard)."""
+    query = (
+        select(Alert.new_status, func.count())
+        .where(Alert.acknowledged.is_(False), Alert.metric.startswith("tds:"))
+        .group_by(Alert.new_status)
+    )
+    if fy:
+        query = query.where(Alert.fy == fy)
+    counts = dict.fromkeys(("critical", "high", "warning", "info"), 0)
+    for status, count in db.execute(query):
+        counts[severity_for_status(status)] += count
+    return counts
+
+
+def acknowledge(db: Session, alert: Alert, by: str, note: str | None = None) -> Alert:
     alert.acknowledged = True
     alert.acknowledged_by = by
+    if note:
+        alert.note = note[:500]
     db.commit()
     db.refresh(alert)
     return alert

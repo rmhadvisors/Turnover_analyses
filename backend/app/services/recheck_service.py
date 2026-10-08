@@ -27,7 +27,7 @@ from app.services.alert_engine import (
     evaluate_band_alert,
     notify,
 )
-from app.services.comparison_service import build_comparison
+from app.services.comparison_service import applicable_limits, build_comparison
 from app.services.fy_utils import next_fy
 
 
@@ -37,7 +37,26 @@ def _record(db: Session, client_id: int, fy: str, event: AlertEvent, **extra) ->
     return alert
 
 
-def _fys_with_data(db: Session, client_id: int) -> set[str]:
+SYSTEM_NOT_APPLICABLE = "System - not applicable to client profile"
+
+
+def _close_inapplicable(db: Session, client_id: int, fy: str) -> int:
+    """Acknowledge open alerts of enabled limits that no longer apply to this client
+    (its profile rules them out). They stay in the history. Returns how many."""
+    applicable = {limit.id for limit in applicable_limits(db, client_id, fy)}
+    enabled = {limit.id for limit in threshold_repo.list_limits(db, enabled_only=True)}
+    closed = 0
+    for alert in alert_repo.list_alerts(db, client_id, fy, unacknowledged_only=True):
+        if not alert.metric.startswith("limit:"):
+            continue
+        limit_id = int(alert.metric.split(":")[1])
+        if limit_id in enabled and limit_id not in applicable:
+            alert.acknowledged, alert.acknowledged_by = True, SYSTEM_NOT_APPLICABLE
+            closed += 1
+    return closed
+
+
+def fys_with_data(db: Session, client_id: int) -> set[str]:
     figures = {f.fy for f in figures_repo.list_figures(db, client_id)}
     return figures | set(voucher_repo.fys_with_vouchers(db, client_id))
 
@@ -51,11 +70,12 @@ def evaluate_client(
     if client is None:
         return []
     settings = threshold_repo.get_settings(db)
-    with_data = _fys_with_data(db, client_id)
+    with_data = fys_with_data(db, client_id)
     targets = sorted({f for fy in fys for f in (fy, next_fy(fy))} & with_data)
 
     raised: list[Alert] = []
     for fy in targets:
+        _close_inapplicable(db, client_id, fy)
         comparison = build_comparison(db, client, fy, as_of)
         for row in comparison.rows:
             if row.band is None:
@@ -100,6 +120,6 @@ def evaluate_all_clients(db: Session, as_of: date | None = None) -> list[Alert]:
     """Full re-check (e.g. after thresholds change)."""
     raised: list[Alert] = []
     for client in client_repo.list_clients(db):
-        raised += evaluate_client(db, client.id, _fys_with_data(db, client.id), as_of)
+        raised += evaluate_client(db, client.id, fys_with_data(db, client.id), as_of)
     db.commit()
     return raised

@@ -3,8 +3,21 @@
 from app.models.absolute_limit import AbsoluteLimit, AbsoluteLimitMetric
 from app.models.alert import Alert
 from app.models.client import Client
+from app.models.client_profile import ClientProfile
 from app.models.column_mapping import ColumnMapping
 from app.models.import_log import ImportLog
+from app.models.tds import (
+    TdsAssignment,
+    TdsClientSettings,
+    TdsEntry,
+    TdsLedger,
+    TdsLedgerMap,
+    TdsParty,
+    TdsPayerYear,
+    TdsResolution,
+    TdsSection,
+    TdsVoucherFlag,
+)
 from app.models.threshold_band import ThresholdSetting
 from app.models.voucher import Voucher, VoucherType
 from app.models.yearly_figures import YearlyFigures
@@ -14,8 +27,19 @@ __all__ = [
     "AbsoluteLimitMetric",
     "Alert",
     "Client",
+    "ClientProfile",
     "ColumnMapping",
     "ImportLog",
+    "TdsAssignment",
+    "TdsClientSettings",
+    "TdsEntry",
+    "TdsLedger",
+    "TdsLedgerMap",
+    "TdsParty",
+    "TdsPayerYear",
+    "TdsResolution",
+    "TdsSection",
+    "TdsVoucherFlag",
     "ThresholdSetting",
     "Voucher",
     "VoucherType",

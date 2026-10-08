@@ -1,55 +1,23 @@
-"""Display-only rupee formatting (lakhs / crores / full Indian grouping).
-
-Presentation only - every figure shown here was calculated by the backend.
-"""
-
-from __future__ import annotations
+"""Compatibility wrappers for display-only rupee and percentage formatting."""
 
 from decimal import Decimal
 
-LAKH = Decimal(100000)
-CRORE = Decimal(10000000)
+from components.ui import format_inr
+
 UNITS = {
     "Auto": "auto",
-    "Lakhs (₹80.00 L)": "lakhs",
-    "Crores (₹1.20 Cr)": "crores",
-    "Full (₹1,00,00,000)": "full",
+    "Lakhs": "lakhs",
+    "Crores": "crores",
+    "Full": "full",
 }
 
 
-def _group_indian(digits: str) -> str:
-    if len(digits) <= 3:
-        return digits
-    head, tail = digits[:-3], digits[-3:]
-    groups = []
-    while len(head) > 2:
-        groups.insert(0, head[-2:])
-        head = head[:-2]
-    if head:
-        groups.insert(0, head)
-    return ",".join(groups) + "," + tail
-
-
 def format_full(value: Decimal) -> str:
-    whole, _, paise = f"{abs(value).quantize(Decimal('0.01'))}".partition(".")
-    text = f"₹{_group_indian(whole)}" + (f".{paise}" if paise != "00" else "")
-    return f"-{text}" if value < 0 else text
+    return format_inr(value, "full")
 
 
 def format_money(value: Decimal | None, unit: str = "auto") -> str:
-    """Format a rupee amount in the chosen unit; '—' when there is no value."""
-    if value is None:
-        return "—"
-    if unit == "full":
-        return format_full(value)
-    divisor, suffix = (
-        (CRORE, "Cr")
-        if unit == "crores" or (unit == "auto" and abs(value) >= CRORE)
-        else (LAKH, "L")
-    )
-    scaled = abs(value / divisor).quantize(Decimal("0.01"))
-    sign = "-" if value < 0 and scaled != 0 else ""
-    return f"{sign}₹{scaled} {suffix}"
+    return format_inr(value, unit)
 
 
 def format_pct(value: Decimal | None) -> str:

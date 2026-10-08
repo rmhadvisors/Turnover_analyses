@@ -10,6 +10,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.alert import Alert
+    from app.models.client_profile import ClientProfile
     from app.models.column_mapping import ColumnMapping
     from app.models.import_log import ImportLog
     from app.models.voucher import Voucher
@@ -38,3 +39,4 @@ class Client(Base):
     column_mappings: Mapped[list[ColumnMapping]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
     )
+    profile: Mapped[ClientProfile | None] = relationship(cascade="all, delete-orphan")

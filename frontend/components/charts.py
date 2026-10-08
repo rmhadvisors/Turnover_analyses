@@ -16,12 +16,14 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from api_client import to_decimal
+from components.common import unit as selected_unit
+from components.money import format_money
 
 LAKH = Decimal(100000)
 CRORE = Decimal(10000000)
 PALETTE = {
-    "light": {"sales": "#2a78d6", "purchases": "#eb6834", "grid": "#e4e5e2", "ink": "#52514e"},
-    "dark": {"sales": "#3987e5", "purchases": "#d95926", "grid": "#33332f", "ink": "#c3c2b7"},
+    "light": {"sales": "#8b75d7", "purchases": "#668077", "grid": "#e4e5e2", "ink": "#52514e"},
+    "dark": {"sales": "#a78bfa", "purchases": "#82968f", "grid": "#33332f", "ink": "#c3c2b7"},
 }
 
 
@@ -53,7 +55,7 @@ def monthly_frame(monthly: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_monthly_figure(monthly: dict, mode: str = "light") -> go.Figure:
+def build_monthly_figure(monthly: dict, mode: str = "light", amount_mode: str = "auto") -> go.Figure:
     """The two-panel grouped bar chart as a Plotly figure (no Streamlit calls)."""
     colours = PALETTE[mode]
     everything = [
@@ -62,8 +64,14 @@ def build_monthly_figure(monthly: dict, mode: str = "light") -> go.Figure:
         for side in ("sales", "purchases")
         for v in monthly[key][side]
     ]
-    divisor, unit_label = (CRORE, "₹ crores") if max(everything) >= CRORE else (LAKH, "₹ lakhs")
-    peak = float(max(everything) / divisor)
+    peak_value = max((abs(value) for value in everything), default=Decimal(0))
+    if amount_mode == "full":
+        divisor, unit_label = Decimal(1), chr(0x20b9)
+    elif amount_mode == "crores" or (amount_mode == "auto" and peak_value >= CRORE):
+        divisor, unit_label = CRORE, chr(0x20b9) + " crores"
+    else:
+        divisor, unit_label = LAKH, chr(0x20b9) + " lakhs"
+    peak = float(peak_value / divisor)
 
     panels = ("current", "previous")
     figure = make_subplots(
@@ -83,7 +91,7 @@ def build_monthly_figure(monthly: dict, mode: str = "light") -> go.Figure:
                     marker_color=colours[side],
                     legendgroup=side,
                     showlegend=column == 1,
-                    hovertemplate=f"%{{x}} · {label}: ₹%{{y:,.2f}} {unit_label.split()[-1]}<extra>FY {monthly[panel]['fy']}</extra>",
+                    hovertemplate=f"%{{x}} | {label}: {unit_label} %{{y:,.2f}}<extra>FY {monthly[panel]['fy']}</extra>",
                 ),
                 row=1,
                 col=column,
@@ -121,11 +129,11 @@ def render_monthly(monthly: dict) -> None:
     if not monthly["has_data"]:
         st.caption("Month-wise data comes from imported Sales / Purchase Registers - none yet.")
         return
-    figure = build_monthly_figure(monthly, _mode())
+    figure = build_monthly_figure(monthly, _mode(), selected_unit())
     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
 
     with st.expander("Table view"):
         frame = monthly_frame(monthly)
         for column in ("Sales", "Purchases"):
-            frame[column] = frame[column].map(lambda v: f"{v:,.2f}")
+            frame[column] = frame[column].map(lambda v: format_money(v, selected_unit()))
         st.dataframe(frame, hide_index=True, width="stretch")

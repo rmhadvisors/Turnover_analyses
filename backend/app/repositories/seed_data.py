@@ -10,6 +10,11 @@ from decimal import Decimal
 from app.models import AbsoluteLimitMetric as M
 
 _V = "Verify current limit before relying on it. "
+PURCHASE_194Q_TEXT = (
+    "TDS at 0.1% on purchases above Rs 50 lakh from any one seller in the year. Checked "
+    "per seller (cash purchases excluded), only for buyers whose previous-year turnover "
+    "exceeded Rs 10 crore."
+)
 
 DEFAULT_LIMITS: list[dict] = [
     {
@@ -87,10 +92,9 @@ DEFAULT_LIMITS: list[dict] = [
     },
     {
         "name": "TDS u/s 194Q - purchases of goods",
-        "metric": M.PURCHASE_TURNOVER,
+        "metric": M.PURCHASE_PER_SELLER,
         "amount": Decimal(5000000),
-        "description": _V + "TDS at 0.1% on purchases above Rs 50 lakh from a seller in the "
-        "year. The law applies per seller; this checks total purchases as a prompt.",
+        "description": _V + PURCHASE_194Q_TEXT,
     },
     {
         "name": "TDS u/s 194Q - buyer turnover",
@@ -99,4 +103,46 @@ DEFAULT_LIMITS: list[dict] = [
         "description": _V + "Section 194Q applies to buyers whose turnover in the preceding "
         "year exceeded Rs 10 crore.",
     },
+    # Rs 50 lakh review triggers (set by the firm): once turnover passes Rs 50 lakh, check
+    # these obligations. The per-payee thresholds in each description are not checked here.
+    *(
+        {
+            "name": name,
+            "metric": M.SALES_TURNOVER,
+            "amount": Decimal(5000000),
+            "description": _V + text,
+        }
+        for name, text in (
+            (
+                "LLP audit",
+                "Review trigger at Rs 50 lakh turnover. LLP accounts must be audited when "
+                "turnover exceeds Rs 40 lakh or partners' contribution exceeds Rs 25 lakh.",
+            ),
+            (
+                "TDS u/s 194J - professional / technical fees",
+                "Review trigger at Rs 50 lakh turnover. TDS on fees for professional or "
+                "technical services above Rs 50,000 per payee in the year (Rs 30,000 before FY 2025-26).",
+            ),
+            (
+                "TDS u/s 194C - contractors",
+                "Review trigger at Rs 50 lakh turnover. TDS on payments to contractors above "
+                "Rs 30,000 in one payment or Rs 1,00,000 in the year per contractor.",
+            ),
+            (
+                "TDS u/s 194H - commission / brokerage",
+                "Review trigger at Rs 50 lakh turnover. TDS on commission or brokerage above "
+                "Rs 20,000 per payee in the year (Rs 15,000 before FY 2025-26).",
+            ),
+            (
+                "TDS u/s 194I(a) - rent of plant & machinery",
+                "Review trigger at Rs 50 lakh turnover. TDS at 2% on rent for plant, machinery "
+                "or equipment above Rs 50,000 per month per payee (Rs 2,40,000 a year before FY 2025-26).",
+            ),
+            (
+                "TDS u/s 194I(b) - rent of land / building",
+                "Review trigger at Rs 50 lakh turnover. TDS at 10% on rent for land, building "
+                "or furniture above Rs 50,000 per month per payee (Rs 2,40,000 a year before FY 2025-26).",
+            ),
+        )
+    ),
 ]

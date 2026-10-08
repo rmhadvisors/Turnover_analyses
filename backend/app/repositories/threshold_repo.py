@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AbsoluteLimit, ThresholdSetting
 from app.repositories.seed_data import DEFAULT_LIMITS
+from app.services.applicability import DEFAULT_RULES
 
 
 def get_settings(db: Session) -> ThresholdSetting:
@@ -35,5 +36,8 @@ def seed_defaults(db: Session) -> None:
     """Create the settings row and, on an empty table, the default limits."""
     get_settings(db)
     if db.scalar(select(AbsoluteLimit.id).limit(1)) is None:
-        db.add_all(AbsoluteLimit(is_default_seed=True, **row) for row in DEFAULT_LIMITS)
+        db.add_all(
+            AbsoluteLimit(is_default_seed=True, applies_when=DEFAULT_RULES.get(row["name"]), **row)
+            for row in DEFAULT_LIMITS
+        )
         db.commit()

@@ -1,4 +1,5 @@
 import json
+from typing import IO
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from app.repositories import client_repo, import_repo
 from app.schemas.imports import (
     ImportLogRead,
     ImportPreview,
+    ImportProgress,
     ImportResult,
     JsonImportResult,
     JsonPreview,
@@ -113,35 +115,71 @@ def save_mapping(
     return body
 
 
-async def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
-    return [(f.filename or "upload.json", await f.read()) for f in files]
+def _uploads(files: list[UploadFile]) -> list[tuple[str, IO[bytes]]]:
+    """The uploaded files as on-disk streams (Starlette spools large uploads to disk),
+    so a 500+ MB export is parsed without being read into memory."""
+    return [(f.filename or "upload.json", f.file) for f in files]
 
 
+def _fy_set(text: str) -> set[str]:
+    fys = {part.strip() for part in text.split(",") if part.strip()}
+    bad = [fy for fy in fys if not is_valid_fy(fy)]
+    if bad:
+        raise HTTPException(422, f"Not a financial year: {bad[0]} (expected e.g. 2025-26)")
+    return fys
+
+
+# These are plain `def` routes: FastAPI runs them in a worker thread, so a long parse
+# does not block the progress endpoint below.
 @router.post("/tally-json/preview", response_model=JsonPreview)
-async def preview_tally_json(
+def preview_tally_json(
     client_id: int = Form(...),
     files: list[UploadFile] = File(...),
+    progress_token: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Dry run for Tally's JSON export: send the Master and Transactions files together."""
+    """Dry run for Tally's JSON export: send the Master and Transactions files together.
+    Poll /imports/tally-json/progress/{progress_token} meanwhile for a progress bar."""
     if client_repo.get_client(db, client_id) is None:
         raise HTTPException(404, "Client not found")
     try:
-        return import_json_service.preview_json(db, client_id, await _read_uploads(files))
+        return import_json_service.preview_json(db, client_id, _uploads(files), progress_token)
     except ImportFormatError as exc:
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.get("/tally-json/progress/{token}", response_model=ImportProgress)
+def tally_json_progress(token: str):
+    progress = import_json_service.progress_for(token)
+    if progress is None:
+        raise HTTPException(404, "No preview is running with this token")
+    return progress
+
+
 @router.post("/tally-json/confirm", response_model=JsonImportResult)
-async def confirm_tally_json(
+def confirm_tally_json(
     client_id: int = Form(...),
-    files: list[UploadFile] = File(...),
+    files: list[UploadFile] | None = File(None),
+    preview_token: str | None = Form(None),
+    replace_fys: str = Form(""),
+    skip_fys: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    """Import Tally's JSON export (sales and purchases), skipping vouchers already imported."""
+    """Import Tally's JSON export (sales and purchases), skipping vouchers already imported.
+    Send the `preview_token` from the preview, or the files again. `replace_fys` /
+    `skip_fys` are comma-separated FYs (e.g. "2025-26") to replace or leave untouched."""
     if client_repo.get_client(db, client_id) is None:
         raise HTTPException(404, "Client not found")
+    if not preview_token and not files:
+        raise HTTPException(422, "Send the files or the preview_token of a preview.")
     try:
-        return import_json_service.import_json(db, client_id, await _read_uploads(files))
+        return import_json_service.import_json(
+            db,
+            client_id,
+            _uploads(files or []),
+            preview_token=preview_token,
+            replace_fys=_fy_set(replace_fys),
+            skip_fys=_fy_set(skip_fys),
+        )
     except ImportFormatError as exc:
         raise HTTPException(422, str(exc)) from exc

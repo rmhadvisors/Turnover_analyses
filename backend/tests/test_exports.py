@@ -168,7 +168,7 @@ def test_summary_export_sorted_by_biggest_mover(api, sample_dir) -> None:
 
     content = download(api, "/reports/summary/export", fy="2025-26", unit="lakhs").content
     sheet = load_workbook(io.BytesIO(content))["Summary"]
-    assert sheet.auto_filter.ref == "A4:I8"
+    assert sheet.auto_filter.ref == "A4:L8"  # incl. the TDS columns
     names = [sheet.cell(row=r, column=1).value for r in range(5, 9)]
     assert names == [
         "Patel Engineering Works",

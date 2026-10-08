@@ -1,8 +1,10 @@
 from decimal import Decimal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.models import AbsoluteLimitMetric
+from app.services.applicability import describe
 from app.services.fy_utils import is_valid_fy
 
 
@@ -34,6 +36,8 @@ class LimitBase(BaseModel):
     description: str | None = None
     approaching_pct: Decimal = Field(default=Decimal(80), gt=0, le=100)
     is_enabled: bool = True
+    # Which clients it applies to (see services/applicability.py). Omit on update to keep it.
+    applies_when: list[dict[str, list[Any]]] | None = None
 
     @model_validator(mode="after")
     def check_fy(self) -> "LimitBase":
@@ -47,3 +51,8 @@ class LimitRead(LimitBase):
 
     id: int
     is_default_seed: bool
+
+    @computed_field
+    @property
+    def applies_to(self) -> str:
+        return describe(self.applies_when)

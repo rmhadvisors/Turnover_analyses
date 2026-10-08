@@ -1,4 +1,4 @@
-"""The 'Tally JSON export' import flow (Master + Transactions files) and the import log."""
+"""The step-by-step Tally JSON import (Master + one year's Transactions) and the import log."""
 
 from __future__ import annotations
 
@@ -6,10 +6,37 @@ import pandas as pd
 import streamlit as st
 
 import api_client as api
-from components.common import page_link, show_error, unit
+from components.common import CLIENTS, choose_fy, page_link, unit
 from components.money import format_money
 
 KIND_LABELS = {"master": "Master (ledgers and groups)", "transactions": "Transactions (vouchers)"}
+STAGE_LABELS = {
+    "uploading": "Uploading files",
+    "reading": "Reading files",
+    "parsing": "Reading vouchers",
+    "done": "Checking against existing data",
+}
+STEPS = ("Choose client", "Select files", "Review", "Import")
+INSTRUCTIONS = (
+    "Upload the **Master** file + **ONE financial year's Transactions** file together "
+    "(Ctrl+click both). The year is detected from voucher dates. Repeat for each year."
+)
+ADD, REPLACE, SKIP = "add", "replace", "skip"
+_STATE_KEY = "tally_json_preview"
+_ROUND_KEY = "tally_json_round"  # bumped to clear the file picker for the next year
+
+
+def _stepper(current: int) -> None:
+    """'✓ 1 · Choose client → 2 · Select files → …' with the current step in bold."""
+    parts = []
+    for index, label in enumerate(STEPS, start=1):
+        if index < current:
+            parts.append(f"✓ {index} · {label}")
+        elif index == current:
+            parts.append(f"**{index} · {label}**")
+        else:
+            parts.append(f":gray[{index} · {label}]")
+    st.markdown(" → ".join(parts))
 
 
 def _files_table(files: list[dict]) -> pd.DataFrame:
@@ -41,82 +68,212 @@ def _totals_table(by_fy: list[dict]) -> pd.DataFrame:
     )
 
 
-def _show_summary(summary: dict) -> None:
-    st.markdown("**Files**")
-    st.dataframe(_files_table(summary["files"]), hide_index=True, width="stretch")
+def _profits_table(profits: list[dict], after_import: bool) -> None:
+    """Gross / net profit worked out from the files, with why a figure is missing."""
+    if not profits:
+        return
+    st.markdown("**Gross and net profit from Tally's P&L ledgers**")
+    rows = []
+    for p in profits:
+        def money(key):
+            value = api.to_decimal(p[key])
+            return format_money(value, unit()) if value is not None else "—"
 
-    a, b, c, d = st.columns(4)
-    a.metric("Vouchers read", summary["vouchers_read"])
-    b.metric("Sales entries", summary["sales_records"])
-    c.metric("Purchase entries", summary["purchase_records"])
-    d.metric("Other (receipts, payments…)", summary["other_vouchers"])
-    if summary["period"]:
-        gstin = ", ".join(summary["company_gstins"]) or "not shown"
-        st.caption(f"Voucher dates: {summary['period']} · Company GSTIN in the file: {gstin}")
-    if summary["by_fy"]:
-        st.markdown("**Totals found**")
-        st.dataframe(_totals_table(summary["by_fy"]), hide_index=True, width="stretch")
-    for warning in summary["warnings"]:
-        st.warning(warning)
+        if after_import:
+            status = "Saved" if p["stored"] else "Not saved"
+        else:
+            status = "Will be saved" if p["will_store"] else "Not saved"
+        rows.append(
+            {
+                "Financial year": f"FY {p['fy']}",
+                "Gross profit": money("gross_profit"),
+                "Net profit": money("net_profit"),
+                "Opening → closing stock": f"{money('opening_stock')} → {money('closing_stock')}",
+                "Status": status,
+                "Notes": " ".join(p["notes"]),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "GP = sales, purchases and direct items + closing stock - opening stock; NP = GP + "
+        "indirect incomes and expenses (as in Tally's P&L). Figures entered manually or from a "
+        "P&L import are never replaced."
+    )
+
+
+def _preview(client: dict, uploaded: list) -> dict | None:
+    """Preview once per selection of files; reruns reuse it instead of re-uploading."""
+    selection = (client["id"], tuple(f.file_id for f in uploaded))
+    state = st.session_state.get(_STATE_KEY)
+    if state and state["selection"] == selection:
+        return state
+    bar = st.progress(0.0, text="Uploading files…")
+
+    def show_progress(stage: str, fraction: float) -> None:
+        bar.progress(fraction, text=f"{STAGE_LABELS.get(stage, stage)}… {fraction:.0%}")
+
+    try:
+        preview = api.preview_tally_json(client["id"], [(f.name, f) for f in uploaded], show_progress)
+    except api.ApiError as exc:
+        st.error(str(exc))
+        return None
+    finally:
+        bar.empty()
+    state = {"selection": selection, "preview": preview, "result": None}
+    st.session_state[_STATE_KEY] = state
+    return state
+
+
+def _year_choices(preview: dict) -> dict[str, str]:
+    """For each FY in the files that already has imported data: add / replace / skip."""
+    choices: dict[str, str] = {}
+    existing = preview.get("existing_vouchers", {})
+    for fy in preview.get("fys_already_imported", []):
+        with st.container(border=True):
+            st.warning(f"FY {fy} is already imported for this client ({existing.get(fy, 0)} vouchers stored).")
+            choice = st.radio(
+                f"What should happen to FY {fy}?",
+                (ADD, REPLACE, SKIP),
+                format_func={
+                    ADD: "Add only vouchers not imported yet (keeps existing data)",
+                    REPLACE: "Replace: delete this year's imported vouchers, then import these files",
+                    SKIP: "Skip this year (import nothing for it)",
+                }.get,
+                key=f"fy_choice_{fy}",
+            )
+            if choice == REPLACE and not st.checkbox(
+                f"I understand {existing.get(fy, 0)} imported vouchers for FY {fy} will be deleted first.",
+                key=f"fy_replace_ok_{fy}",
+            ):
+                choice = "unconfirmed"
+            choices[fy] = choice
+    return choices
+
+
+def _show_result(result: dict) -> None:
+    st.success(
+        f"Imported **{result['imported']}** entries "
+        f"({result['duplicates_skipped']} already stored, skipped). "
+        f"{result['alerts_raised']} new alert(s) raised."
+    )
+    for fy, count in result.get("replaced", {}).items():
+        st.caption(f"FY {fy}: {count} previously imported vouchers were replaced.")
+    if result.get("skipped_fys"):
+        st.caption("Left unchanged: " + ", ".join(f"FY {fy}" for fy in result["skipped_fys"]))
+    if result["fys_affected"]:
+        st.caption("Financial years updated: " + ", ".join(f"FY {y}" for y in result["fys_affected"]))
 
 
 def render_json_import(client: dict) -> None:
-    """Upload -> preview -> confirm for Tally's JSON export."""
+    """Choose client (sidebar) → select files → review the detected year → import."""
+    round_no = st.session_state.get(_ROUND_KEY, 0)
+    state = st.session_state.get(_STATE_KEY)
+    step = 4 if state and state.get("result") else 3 if state else 2
+    _stepper(step)
+    st.caption(f"Client: **{client['name']}** (change it in the sidebar)")
+    st.info(INSTRUCTIONS, icon=":material/info:")
+
     uploaded = st.file_uploader(
-        "Tally JSON files - select the Master file and the Transactions file together",
+        "Master + Transactions JSON files",
         type=["json"],
         accept_multiple_files=True,
-        key=f"json_files_{client['id']}",
-    )
-    st.caption(
-        "Both files must come from the same company. The Master file tells the tool which "
-        "ledgers are sales, purchases and GST; the Transactions file holds the vouchers."
+        key=f"json_files_{client['id']}_{round_no}",
     )
     if not uploaded:
+        st.session_state.pop(_STATE_KEY, None)
+        return
+    if len(uploaded) < 2:
+        st.warning("Select both files together: the Master file and one Transactions file.")
         return
 
-    files = [(f.name, f.getvalue()) for f in uploaded]
-    try:
-        preview = api.preview_tally_json(client["id"], files)
-    except api.ApiError as exc:
-        show_error(exc)
+    state = _preview(client, uploaded)
+    if state is None:
         return
+    preview, result = state["preview"], state["result"]
 
-    _show_summary(preview)
-    st.subheader("Ready to import")
-    x, y = st.columns(2)
-    x.metric("New entries to import", preview["would_import"])
-    y.metric("Already imported (will be skipped)", preview["duplicates"])
-    if preview["sample"]:
-        with st.expander("First few entries"):
-            st.dataframe(pd.DataFrame(preview["sample"]), hide_index=True, width="stretch")
-    if not preview["would_import"]:
-        st.info("Nothing new to import from these files.")
-
-    if st.button("Confirm import", type="primary", disabled=not preview["would_import"]):
-        try:
-            result = api.confirm_tally_json(client["id"], files)
-        except api.ApiError as exc:
-            show_error(exc)
-            return
-        st.success(
-            f"Imported **{result['imported']}** entries "
-            f"({result['duplicates_skipped']} duplicates skipped). "
-            f"{result['alerts_raised']} new alert(s) raised."
+    st.subheader("Review")
+    fys = [row["fy"] for row in preview["by_fy"]]
+    if preview["period"]:
+        detected = ", ".join(f"FY {fy}" for fy in fys) or "no sales or purchases"
+        st.markdown(f"Vouchers dated **{preview['period']}** → **{detected}**")
+    if len(fys) > 1:
+        st.warning(
+            f"These files hold {len(fys)} financial years. Import one year's Transactions file "
+            "at a time so each year can be checked on its own."
         )
-        if result["fys_affected"]:
-            st.caption(
-                "Financial years updated: " + ", ".join(f"FY {y}" for y in result["fys_affected"])
-            )
-        page_link("pages/5_Client_Report.py", "Open the client report →")
+    if preview["by_fy"]:
+        st.dataframe(_totals_table(preview["by_fy"]), hide_index=True, width="stretch")
+    _profits_table(result["profits"] if result else preview.get("profits", []), result is not None)
+    for warning in preview["warnings"]:
+        st.warning(warning)
+    with st.expander("Details: files and voucher counts"):
+        st.dataframe(_files_table(preview["files"]), hide_index=True, width="stretch")
+        a, b, c, d = st.columns(4)
+        a.metric("Vouchers read", preview["vouchers_read"])
+        b.metric("Sales entries", preview["sales_records"])
+        c.metric("Purchase entries", preview["purchase_records"])
+        d.metric("Other (receipts, payments…)", preview["other_vouchers"])
+        gstin = ", ".join(preview["company_gstins"]) or "not shown"
+        st.caption(f"Company GSTIN in the file: {gstin}")
+        if preview["sample"]:
+            st.markdown("**First few new entries**")
+            st.dataframe(pd.DataFrame(preview["sample"]), hide_index=True, width="stretch")
+
+    if result is not None:
+        _show_result(result)
+        page_link(CLIENTS, "Open the client report →")
+        if st.button("Import another year", icon=":material/add:"):
+            st.session_state.pop(_STATE_KEY, None)
+            st.session_state[_ROUND_KEY] = round_no + 1
+            st.rerun()
+        return
+
+    choices = _year_choices(preview)
+    replace = [fy for fy, choice in choices.items() if choice == REPLACE]
+    skip = [fy for fy, choice in choices.items() if choice == SKIP]
+    importing = [fy for fy in fys if fy not in skip]
+    new_count = preview["would_import"]
+    st.metric("New entries to import", new_count, help="Entries already stored are skipped.")
+    blocked = "unconfirmed" in choices.values()
+    profit_updates = [p for p in preview.get("profits", []) if p["will_store"] and p["fy"] not in skip]
+    nothing = not importing or (not new_count and not replace and not profit_updates)
+    if nothing and not blocked:
+        st.info("Nothing new to import from these files.")
+    label = "Import " + (", ".join(f"FY {fy}" for fy in importing) if importing else "")
+    if st.button(label.strip(), type="primary", disabled=blocked or nothing):
+        try:
+            with st.spinner("Importing and re-checking alerts…"):
+                state["result"] = api.confirm_tally_json(
+                    client["id"], preview["preview_token"], replace, skip
+                )
+        except api.ApiError as exc:
+            st.error(str(exc))
+            return
+        if state["result"]["fys_affected"]:
+            choose_fy(max(state["result"]["fys_affected"]))  # show the imported year
+        st.rerun()  # so the sidebar's years and alert count include the new data
 
 
 def show_import_log(client_id: int) -> None:
-    st.divider()
-    st.subheader("Import log")
-    log = api.import_log(client_id)
+    st.markdown("**Import log**")
+    try:
+        log = api.import_log(client_id)
+    except api.ApiError as exc:
+        st.error(str(exc))
+        return
     if not log:
         st.caption("No imports yet for this client.")
         return
     columns = ["imported_at", "file_name", "report_type", "period", "rows_imported", "rows_skipped"]
-    st.dataframe(pd.DataFrame(log)[columns], width="stretch", hide_index=True)
+    frame = pd.DataFrame(log)[columns].rename(
+        columns={
+            "imported_at": "Imported at",
+            "file_name": "Files",
+            "report_type": "Register",
+            "period": "Period",
+            "rows_imported": "Imported",
+            "rows_skipped": "Skipped",
+        }
+    )
+    frame["Imported at"] = frame["Imported at"].astype(str).str.replace("T", " ").str[:16]
+    st.dataframe(frame, width="stretch", hide_index=True)

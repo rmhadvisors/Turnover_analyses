@@ -15,7 +15,14 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.models import Client
-from app.repositories import figures_repo, import_repo, threshold_repo, voucher_repo
+from app.repositories import (
+    figures_repo,
+    import_repo,
+    profile_repo,
+    threshold_repo,
+    voucher_repo,
+)
+from app.services import applicability
 from app.services.alert_engine import (
     AbsoluteLimitStatus,
     BandStatus,
@@ -41,6 +48,7 @@ from app.services.turnover import (
     monthly_series,
     net_purchases,
     net_sales,
+    purchase_entries_by_seller,
 )
 
 METRICS = (
@@ -172,6 +180,31 @@ def _exact_period_label(period: Period) -> str:
     return f"{period.start:%d-%b} to {period.end:%d-%b} only"
 
 
+def _per_seller_check(vouchers, limit, include_gst: bool):
+    """The worst seller for a per-seller limit: the first to cross it, else the largest."""
+    checks = [
+        check_limit_series(entries, limit.amount, limit.approaching_pct)
+        for entries in purchase_entries_by_seller(vouchers, include_gst).values()
+    ]
+    crossed = [c for c in checks if c.crossed_on is not None]
+    if crossed:
+        return min(crossed, key=lambda c: c.crossed_on)
+    return max(checks, key=lambda c: c.cumulative, default=None)
+
+
+def applicable_limits(db: Session, client_id: int, fy: str) -> list:
+    """Enabled limits for this FY whose `applies_when` rule matches the client's profile."""
+    previous = figures_repo.get_figures(db, client_id, previous_fy(fy))
+    facts = applicability.context(
+        profile_repo.get_profile(db, client_id), previous.turnover if previous else None
+    )
+    return [
+        limit
+        for limit in threshold_repo.list_limits(db, enabled_only=True)
+        if limit.fy_scope in (None, fy) and applicability.applies(limit.applies_when, facts)
+    ]
+
+
 def _limit_results(
     db: Session, client_id: int, fy: str, as_of: date, include_gst: bool, cur: dict
 ) -> list[LimitResult]:
@@ -179,10 +212,26 @@ def _limit_results(
         v for v in voucher_repo.amounts_for_fy(db, client_id, fy) if v.voucher_date <= as_of
     ]
     results = []
-    for limit in threshold_repo.list_limits(db, enabled_only=True):
-        if limit.fy_scope not in (None, fy):
-            continue
+    for limit in applicable_limits(db, client_id, fy):
         metric = limit.metric.value
+        if metric == "purchase_per_seller":
+            check = _per_seller_check(vouchers, limit, include_gst)
+            if check is None:
+                continue  # no purchases from an identifiable seller
+            results.append(
+                LimitResult(
+                    limit.id,
+                    limit.name,
+                    metric,
+                    limit.amount,
+                    limit.approaching_pct,
+                    check.status,
+                    check.cumulative,
+                    check.crossed_on,
+                    check.crossed_voucher_no,
+                )
+            )
+            continue
         entries = limit_entries(vouchers, metric, include_gst)
         if entries:
             check = check_limit_series(entries, limit.amount, limit.approaching_pct)

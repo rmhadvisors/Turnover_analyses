@@ -5,23 +5,30 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 import app.models
-from app.api import alerts, clients, entries, imports, reports, thresholds
+from app.api import alerts, clients, entries, imports, reports, tds, thresholds, workspace
 from app.config import settings
 from app.database import Base, SessionLocal, engine
-from app.repositories import threshold_repo
+from app.migrations import upgrade
+from app.repositories import tds_repo, threshold_repo
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    # create_all only creates missing tables; add indexes declared since a table was made.
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(engine, checkfirst=True)
+    upgrade(engine)
     with SessionLocal() as db:
         threshold_repo.seed_defaults(db)
+        tds_repo.seed_sections(db)
     yield
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
-for module in (clients, imports, entries, thresholds, reports, alerts):
+for module in (clients, imports, entries, thresholds, reports, alerts, workspace, tds):
     app.include_router(module.router)
 
 

@@ -14,6 +14,8 @@ from datetime import date
 from decimal import Decimal
 from enum import Enum
 
+from app.services.tds_engine import TdsStatus
+
 DEFAULT_MODERATE_PCT = Decimal(5)
 DEFAULT_SIGNIFICANT_PCT = Decimal(20)
 DEFAULT_APPROACHING_PCT = Decimal(80)
@@ -166,21 +168,34 @@ _CRITICAL = {
     BandStatus.SIGNIFICANT_DECREASE.value,
 }
 _CRITICAL.add(AbsoluteLimitStatus.CROSSED.value)
+_CRITICAL.add(TdsStatus.NOT_DEDUCTED.value)
+_HIGH = {TdsStatus.SHORT.value, TdsStatus.UNIDENTIFIED.value}
 _WARNING = {BandStatus.MODERATE_INCREASE.value, BandStatus.MODERATE_DECREASE.value}
 _WARNING.add(AbsoluteLimitStatus.APPROACHING.value)
+_WARNING.add(TdsStatus.APPROACHING.value)
+_WARNING.add(TdsStatus.EXCESS.value)  # over-deduction is always reported
+SEVERITIES = ("critical", "high", "warning", "info")
+ACTIONABLE = ("critical", "high", "warning")
 
 
 def severity_for_status(status: str) -> str:
-    """'critical' (red), 'warning' (amber) or 'info' (green / back to normal)."""
+    """'critical' (red), 'high' (orange, TDS short deducted), 'warning' (amber) or
+    'info' (green / back to normal / TDS correctly deducted)."""
     if status in _CRITICAL:
         return "critical"
+    if status in _HIGH:
+        return "high"
     if status in _WARNING:
         return "warning"
     return "info"
 
 
 def statuses_for_severity(severity: str) -> list[str]:
-    all_statuses = [s.value for s in BandStatus] + [s.value for s in AbsoluteLimitStatus]
+    all_statuses = (
+        [s.value for s in BandStatus]
+        + [s.value for s in AbsoluteLimitStatus]
+        + [s.value for s in TdsStatus]
+    )
     return [s for s in all_statuses if severity_for_status(s) == severity]
 
 

@@ -52,7 +52,10 @@ def create_limit(body: LimitBase, db: Session = Depends(get_db)):
 @router.put("/limits/{limit_id}", response_model=LimitRead)
 def update_limit(limit_id: int, body: LimitBase, db: Session = Depends(get_db)):
     limit = _limit_or_404(db, limit_id)
-    for key, value in body.model_dump().items():
+    values = body.model_dump()
+    if "applies_when" not in body.model_fields_set:
+        values.pop("applies_when")  # an update without a rule keeps the existing one
+    for key, value in values.items():
         setattr(limit, key, value)
     db.commit()
     evaluate_all_clients(db)

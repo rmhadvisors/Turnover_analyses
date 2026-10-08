@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import Voucher, VoucherType
@@ -36,37 +36,78 @@ def add_many(db: Session, client_id: int, import_log_id: int, parsed: list[Parse
     db.flush()
 
 
-def _amounts(rows) -> list[VoucherAmount]:
+# Only the columns the turnover calculations use: loading full ORM objects was most
+# of the time spent by the report endpoints.
+_AMOUNT_COLUMNS = (
+    Voucher.voucher_type,
+    Voucher.voucher_date,
+    Voucher.voucher_no,
+    Voucher.taxable_value,
+    Voucher.total_value,
+    Voucher.party,
+)
+
+
+def _amounts(query) -> list[VoucherAmount]:
     return [
-        VoucherAmount(
-            v.voucher_type.value,
-            v.voucher_date,
-            v.voucher_no,
-            v.taxable_value,
-            v.total_value,
-        )
-        for v in rows
+        VoucherAmount(voucher_type.value, voucher_date, voucher_no, taxable, total, party)
+        for voucher_type, voucher_date, voucher_no, taxable, total, party in query
     ]
 
 
 def amounts_for_range(db: Session, client_id: int, start: date, end: date) -> list[VoucherAmount]:
     """Vouchers dated within [start, end], in date order, as plain amounts."""
     query = (
-        select(Voucher)
+        select(*_AMOUNT_COLUMNS)
         .where(Voucher.client_id == client_id, Voucher.voucher_date.between(start, end))
         .order_by(Voucher.voucher_date, Voucher.id)
     )
-    return _amounts(db.scalars(query))
+    return _amounts(db.execute(query))
 
 
 def amounts_for_fy(db: Session, client_id: int, fy: str) -> list[VoucherAmount]:
     query = (
-        select(Voucher)
+        select(*_AMOUNT_COLUMNS)
         .where(Voucher.client_id == client_id, Voucher.fy == fy)
         .order_by(Voucher.voucher_date, Voucher.id)
     )
-    return _amounts(db.scalars(query))
+    return _amounts(db.execute(query))
 
 
 def fys_with_vouchers(db: Session, client_id: int) -> list[str]:
-    return sorted(set(db.scalars(select(Voucher.fy).where(Voucher.client_id == client_id))))
+    return sorted(db.scalars(select(Voucher.fy).where(Voucher.client_id == client_id).distinct()))
+
+
+def counts_by_client_fy(db: Session) -> list[tuple[int, str, str, int]]:
+    """(client_id, fy, voucher_type, count) for every client."""
+    query = select(Voucher.client_id, Voucher.fy, Voucher.voucher_type, func.count()).group_by(
+        Voucher.client_id, Voucher.fy, Voucher.voucher_type
+    )
+    return [(cid, fy, vtype.value, n) for cid, fy, vtype, n in db.execute(query)]
+
+
+def count_imported_by_fy(db: Session, client_id: int) -> dict[str, int]:
+    """Imported vouchers stored for this client, per FY."""
+    query = (
+        select(Voucher.fy, func.count())
+        .where(Voucher.client_id == client_id, Voucher.import_log_id.is_not(None))
+        .group_by(Voucher.fy)
+    )
+    return dict(db.execute(query).all())
+
+
+def delete_imported_for_fy(db: Session, client_id: int, fy: str) -> int:
+    """Remove this client's imported vouchers for one FY (used by 'replace'). Returns the count."""
+    result = db.execute(
+        delete(Voucher).where(
+            Voucher.client_id == client_id,
+            Voucher.fy == fy,
+            Voucher.import_log_id.is_not(None),
+        )
+    )
+    return result.rowcount or 0
+
+
+def all_fys(db: Session) -> set[str]:
+    """Every FY with vouchers for any client."""
+    return set(db.scalars(select(Voucher.fy).distinct()))

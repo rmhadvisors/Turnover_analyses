@@ -1,0 +1,11 @@
+[theme]
+base = "dark"
+primaryColor = "#a78bfa"
+backgroundColor = "#121a24"
+secondaryBackgroundColor = "#1b2633"
+textColor = "#e8edf4"
+font = "sans serif"
+
+[server]
+# Tally Transactions exports can exceed 500 MB (Streamlit default: 200 MB).
+maxUploadSize = 1024

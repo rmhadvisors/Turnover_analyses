@@ -24,7 +24,8 @@ def save_entry(body: ManualEntryIn, db: Session = Depends(get_db)):
         for fy in (body.previous_fy, body.current_fy)
     ]
     return ManualEntryResult(
-        figures=[FiguresRead.model_validate(f) for f in figures],
+        # a year with nothing typed and no stored figures has no row
+        figures=[FiguresRead.model_validate(f) for f in figures if f is not None],
         alerts_raised=len(raised),
     )
 

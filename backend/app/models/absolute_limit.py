@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,8 @@ class AbsoluteLimitMetric(str, enum.Enum):
     SALES_TURNOVER = "sales_turnover"
     PURCHASE_TURNOVER = "purchase_turnover"
     AGGREGATE_TURNOVER = "aggregate_turnover"
+    # purchases from any one seller in the year (e.g. TDS u/s 194Q); cash purchases excluded
+    PURCHASE_PER_SELLER = "purchase_per_seller"
 
 
 class AbsoluteLimit(Base):
@@ -38,3 +40,5 @@ class AbsoluteLimit(Base):
     approaching_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("80.00"))
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default_seed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which clients the limit applies to (see services/applicability.py); null = all.
+    applies_when: Mapped[list | None] = mapped_column(JSON)

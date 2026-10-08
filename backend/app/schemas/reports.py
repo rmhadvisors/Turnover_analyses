@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
+from app.schemas.alerts import AlertRead
+
 
 class MetricRowRead(BaseModel):
     key: str
@@ -58,6 +60,10 @@ class SummaryRow(BaseModel):
     limits_crossed: int
     limits_approaching: int
     open_alerts: int
+    # TDS (None when the client has no ledger-level Tally data for the year)
+    tds_parties_crossed: int | None = None
+    tds_payable: Decimal | None = None
+    tds_not_deducted: Decimal | None = None
 
 
 class MonthlySeriesRead(BaseModel):
@@ -73,3 +79,28 @@ class MonthlyRead(BaseModel):
     current: MonthlySeriesRead
     previous: MonthlySeriesRead
     has_data: bool
+
+
+class AlertCounts(BaseModel):
+    client_id: int
+    critical: int
+    high: int = 0
+    warning: int
+    info: int
+
+
+class DashboardRead(BaseModel):
+    """Everything the dashboard shows for one FY, in a single response."""
+
+    fy: str
+    rows: list[SummaryRow]
+    open_alerts: list[AlertCounts]  # unacknowledged alerts for the FY, by client and severity
+
+
+class ClientReportRead(BaseModel):
+    """Everything the client report page shows, in a single response."""
+
+    comparison: ComparisonRead
+    monthly: MonthlyRead
+    alerts: list[AlertRead]
+    tds: dict | None = None  # TDS summary block (services/tds_report.summary_block)

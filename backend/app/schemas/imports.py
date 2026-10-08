@@ -76,6 +76,19 @@ class JsonFyTotals(BaseModel):
     purchase_count: int
 
 
+class JsonProfit(BaseModel):
+    """Gross / net profit worked out from the export for one FY."""
+
+    fy: str
+    gross_profit: Decimal | None
+    net_profit: Decimal | None
+    opening_stock: Decimal | None = None
+    closing_stock: Decimal | None = None
+    will_store: bool = False  # preview: would be saved (no manual / P&L figures to keep)
+    stored: bool = False  # import result: was saved
+    notes: list[str] = []
+
+
 class JsonSummary(BaseModel):
     files: list[JsonFileInfo]
     period: str | None
@@ -93,6 +106,15 @@ class JsonPreview(JsonSummary):
     would_import: int
     duplicates: int
     sample: list[dict[str, Any]]
+    fys_already_imported: list[str] = []  # FYs in these files that already have imported data
+    existing_vouchers: dict[str, int] = {}  # FY -> imported vouchers already stored
+    profits: list[JsonProfit] = []
+    preview_token: str | None = None  # pass to /tally-json/confirm instead of the files
+
+
+class ImportProgress(BaseModel):
+    stage: str  # reading | parsing | done
+    fraction: float  # 0..1 of the uploaded bytes parsed
 
 
 class JsonImportResult(JsonSummary):
@@ -101,3 +123,6 @@ class JsonImportResult(JsonSummary):
     import_log_ids: list[int]
     fys_affected: list[str]
     alerts_raised: int
+    replaced: dict[str, int] = {}  # FY -> previously imported vouchers removed
+    skipped_fys: list[str] = []
+    profits: list[JsonProfit] = []

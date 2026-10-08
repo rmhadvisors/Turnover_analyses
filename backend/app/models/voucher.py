@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +29,8 @@ class Voucher(Base):
     __tablename__ = "vouchers"
     __table_args__ = (
         UniqueConstraint("client_id", "dedup_key", name="uq_voucher_client_dedup_key"),
+        Index("ix_vouchers_client_fy_date", "client_id", "fy", "voucher_date"),
+        Index("ix_vouchers_client_date", "client_id", "voucher_date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

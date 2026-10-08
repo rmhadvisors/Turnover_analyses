@@ -23,6 +23,7 @@ class VoucherAmount:
     voucher_no: str
     taxable: Decimal
     total: Decimal
+    party: str | None = None
 
 
 def _basis(v: VoucherAmount, include_gst: bool) -> Decimal:
@@ -59,6 +60,25 @@ def monthly_series(
         key: (net_sales(items, include_gst), net_purchases(items, include_gst))
         for key, items in sorted(buckets.items())
     }
+
+
+def purchase_entries_by_seller(
+    vouchers: Iterable[VoucherAmount], include_gst: bool = False
+) -> dict[str, list[tuple[date, str, Decimal]]]:
+    """Signed purchase entries per seller (for per-seller limits such as TDS u/s 194Q).
+    Vouchers without a party, and cash purchases, have no identifiable seller and are left out."""
+    by_seller: dict[str, list[tuple[date, str, Decimal]]] = defaultdict(list)
+    for v in vouchers:
+        seller = " ".join((v.party or "").split())
+        if (
+            v.voucher_type not in PURCHASE_TYPES
+            or not seller
+            or seller.casefold().startswith("cash")
+        ):
+            continue
+        signed = PURCHASE_TYPES[v.voucher_type] * _basis(v, include_gst)
+        by_seller[seller].append((v.voucher_date, v.voucher_no, signed))
+    return dict(by_seller)
 
 
 def limit_entries(

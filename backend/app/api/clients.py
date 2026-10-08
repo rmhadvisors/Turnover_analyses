@@ -4,8 +4,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_client_or_404
 from app.database import get_db
 from app.models import Client
-from app.repositories import client_repo
+from app.repositories import client_repo, profile_repo
 from app.schemas.client import ClientIn, ClientRead
+from app.schemas.profile import ProfileIn, ProfileRead
+from app.services.applicability import STATES, parse_gstin
+from app.services.recheck_service import evaluate_client, fys_with_data
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -40,6 +43,42 @@ def rename_client(
 ):
     _ensure_name_free(db, body.name, client.id)
     return client_repo.rename_client(db, client, body.name)
+
+
+_CHOICES = ("gst_registered", "special_category", "entity_type", "nature", "supplies",
+            "presumptive", "cash_within_5pct")  # fmt: skip
+
+
+def _profile_read(client_id: int, profile) -> ProfileRead:
+    values = {name: getattr(profile, name, None) for name in ("gstin", "state_code", *_CHOICES)}
+    facts = parse_gstin(values["gstin"])
+    return ProfileRead(
+        client_id=client_id,
+        **values,
+        state_name=STATES.get(values["state_code"] or ""),
+        entity_hint=facts.hint if facts and values["entity_type"] is None else None,
+        unknown_fields=[name for name in _CHOICES if values[name] is None],
+    )
+
+
+@router.get("/{client_id}/profile", response_model=ProfileRead)
+def read_profile(client: Client = Depends(get_client_or_404), db: Session = Depends(get_db)):
+    return _profile_read(client.id, profile_repo.get_profile(db, client.id))
+
+
+@router.put("/{client_id}/profile", response_model=ProfileRead)
+def save_profile(
+    body: ProfileIn, client: Client = Depends(get_client_or_404), db: Session = Depends(get_db)
+):
+    """Save the profile, then re-check every year: limits that no longer apply have their
+    open alerts acknowledged by the system; limits that now apply are evaluated."""
+    values = body.model_dump()
+    facts = parse_gstin(body.gstin)
+    values["state_code"] = facts.state_code if facts else None
+    profile = profile_repo.save_profile(db, client.id, values)
+    evaluate_client(db, client.id, fys_with_data(db, client.id))
+    db.commit()
+    return _profile_read(client.id, profile)
 
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)

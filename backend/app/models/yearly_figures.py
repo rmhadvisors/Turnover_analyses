@@ -28,6 +28,9 @@ class YearlyFigures(Base):
     gross_profit: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     net_profit: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     is_manual: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Where gross / net profit came from: manual | pl_import | tally_json. A derived
+    # (tally_json) value never replaces a manual or P&L-import one.
+    profit_source: Mapped[str | None] = mapped_column(String(20))
     computed_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

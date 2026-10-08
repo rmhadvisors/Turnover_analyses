@@ -199,7 +199,9 @@ def _import_profit_loss(
         "net_profit": figures.net_profit,
     }
     values = {k: v for k, v in values.items() if v is not None}
-    figures_repo.upsert_figures(db, client_id, target_fy, values)
+    row = figures_repo.upsert_figures(db, client_id, target_fy, values)
+    if values:
+        row.profit_source = "pl_import"
     log = import_repo.create_log(
         db,
         client_id=client_id,

@@ -9,13 +9,23 @@ from sqlalchemy.pool import StaticPool
 import app.models
 from app.database import Base, get_db
 from app.main import app
-from app.repositories import threshold_repo
+from app.repositories import tds_repo, threshold_repo
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 
 
 @pytest.fixture()
 def session_factory():
+    return _session_factory()
+
+
+@pytest.fixture(scope="module")
+def session_factory_module():
+    """One database for a whole test module (slow real-data imports done once)."""
+    return _session_factory()
+
+
+def _session_factory():
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -25,6 +35,7 @@ def session_factory():
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     with factory() as seed_session:
         threshold_repo.seed_defaults(seed_session)
+        tds_repo.seed_sections(seed_session)
     return factory
 
 

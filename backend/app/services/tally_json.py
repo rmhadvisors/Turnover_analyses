@@ -10,20 +10,25 @@ debit note. Deleted, cancelled, optional and void vouchers are excluded, as in T
 
 Tally exports these files as UTF-16 and, if the export is interrupted, the file can end
 in the middle of a voucher. `read_records` keeps every complete record and reports the
-cut instead of rejecting the whole file.
+cut instead of rejecting the whole file. Files are read as a stream (ijson), so a
+500+ MB export is never held in memory as one string or one list of records.
 
 Amount convention in the export: credit is positive, debit is negative.
 """
 
 from __future__ import annotations
 
-import json
+import codecs
+import io
 import re
 from collections import Counter
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import IO, Any
+
+import ijson
 
 from app.services.fy_utils import fy_label
 from app.services.tally_importer import (
@@ -43,6 +48,7 @@ EXCLUDED_FLAGS = (
     ("isoptional", "optional (not posted)"),
 )
 _TWO_PLACES = Decimal("0.01")
+_STOCK_KEY = "stock-in-hand"  # Tally's reserved group, matched case-insensitively
 _TAX_NAME = re.compile(r"\b(cgst|sgst|utgst|igst|gst|cess)\b", re.IGNORECASE)
 
 
@@ -59,17 +65,129 @@ def _key(name: Any) -> str:
 # ------------------------------------------------------------------- reading
 
 
-def decode_text(content: bytes) -> str:
-    if content[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return content.decode("utf-16", errors="replace")
-    if content[:3] == b"\xef\xbb\xbf":
-        return content.decode("utf-8-sig", errors="replace")
-    for encoding in ("utf-8", "utf-16"):
+def _sniff_encoding(head: bytes) -> tuple[str, int]:
+    """(codec, BOM length) from the first bytes of a file."""
+    if head[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
+        return "utf-16", 0  # the utf-16 codec reads the BOM itself
+    if head[:3] == codecs.BOM_UTF8:
+        return "utf-8", 3
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+        return "utf-8", 0
+    except UnicodeDecodeError:
+        pass
+    if bytes(1) in head:  # NUL bytes: UTF-16 without a BOM
+        return "utf-16", 0
+    return "cp1252", 0
+
+
+class _Utf8Stream:
+    """Re-encodes a UTF-16 / UTF-8 / cp1252 byte stream as UTF-8, chunk by chunk, for
+    ijson. `on_read(n)` is told how many source bytes were consumed (for progress)."""
+
+    CHUNK = 1 << 20
+
+    def __init__(self, raw: IO[bytes], on_read: Callable[[int], None] | None = None):
+        head = raw.read(4096)
+        encoding, bom = _sniff_encoding(head)
+        raw.seek(bom)
+        self._raw = raw
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self._buffer = bytearray()
+        self._done = False
+        self._on_read = on_read
+
+    def read(self, size: int = -1) -> bytes:
+        while not self._done and (size < 0 or len(self._buffer) < size):
+            chunk = self._raw.read(self.CHUNK)
+            if self._on_read and chunk:
+                self._on_read(len(chunk))
+            self._done = not chunk
+            self._buffer += self._decoder.decode(chunk, final=self._done).encode("utf-8")
+        if size < 0:
+            size = len(self._buffer)
+        out = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return out
+
+
+def _records_prefix(raw: IO[bytes], file_name: str) -> str:
+    """ijson path of the `tallymessage` array, wherever it sits in the document."""
+    raw.seek(0)
+    try:
+        events = ijson.parse(_Utf8Stream(raw))
+        for prefix, event, value in events:
+            if event == "map_key" and value == "tallymessage":
+                path = f"{prefix}.tallymessage" if prefix else "tallymessage"
+                _, next_event, _ = next(events, (None, None, None))
+                if next_event != "start_array":
+                    raise ImportFormatError(
+                        f"'{file_name}' has no record list after 'tallymessage'."
+                    )
+                return path
+    except ijson.JSONError:
+        pass
+    raise ImportFormatError(f"'{file_name}' is not a Tally JSON export (no 'tallymessage' data).")
+
+
+def _array_closed(raw: IO[bytes], path: str) -> bool:
+    """True if the `tallymessage` array ends with its ']' (so a later error is only in
+    the document's trailer, not a cut-off record). Only used on files that failed to parse."""
+    raw.seek(0)
+    try:
+        for prefix, event, _ in ijson.parse(_Utf8Stream(raw)):
+            if event == "end_array" and prefix == path:
+                return True
+    except ijson.JSONError:
+        pass
+    return False
+
+
+class RecordsStream:
+    """The `tallymessage` records of one file, read lazily and only once per pass.
+
+    `truncated` and `count` are known after a full pass. A file cut off mid-record
+    yields every complete record before the cut, then sets `truncated`."""
+
+    def __init__(
+        self,
+        raw: IO[bytes],
+        file_name: str = "file.json",
+        on_read: Callable[[int], None] | None = None,
+    ):
+        self.file_name = file_name
+        self._raw = raw
+        self._on_read = on_read
+        self._path = _records_prefix(raw, file_name)
+        self.truncated = False
+        self.count = 0
+
+    def head(self, limit: int) -> list[dict]:
+        """The first `limit` records (a cheap peek, e.g. to tell Master from Transactions)."""
+        out: list[dict] = []
+        self._raw.seek(0)
         try:
-            return content.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return content.decode("cp1252", errors="replace")
+            for record in ijson.items(_Utf8Stream(self._raw), f"{self._path}.item", use_float=True):
+                if isinstance(record, dict):
+                    out.append(record)
+                    if len(out) >= limit:
+                        break
+        except ijson.JSONError:
+            pass
+        return out
+
+    @property
+    def records(self) -> Iterator[dict]:
+        self._raw.seek(0)
+        self.count, self.truncated = 0, False
+        stream = _Utf8Stream(self._raw, self._on_read)
+        try:
+            for record in ijson.items(stream, f"{self._path}.item", use_float=True):
+                if isinstance(record, dict):
+                    self.count += 1
+                    yield record
+        except ijson.JSONError:
+            self.truncated = not _array_closed(self._raw, self._path)
 
 
 @dataclass
@@ -78,35 +196,17 @@ class RecordsFile:
     records: list[dict]
     truncated: bool
 
+    @property
+    def count(self) -> int:
+        return len(self.records)
+
 
 def read_records(content: bytes, file_name: str = "file.json") -> RecordsFile:
-    """Read the `tallymessage` array. A file cut off mid-record yields all complete
-    records before the cut with `truncated=True`."""
-    text = decode_text(content)
-    marker = text.find('"tallymessage"')
-    if marker < 0:
-        raise ImportFormatError(
-            f"'{file_name}' is not a Tally JSON export (no 'tallymessage' data)."
-        )
-    start = text.find("[", marker)
-    if start < 0:
-        raise ImportFormatError(f"'{file_name}' has no record list after 'tallymessage'.")
-    decoder = json.JSONDecoder()
-    records: list[dict] = []
-    position, size = start + 1, len(text)
-    while True:
-        while position < size and text[position] in " \r\n\t,":
-            position += 1
-        if position >= size:
-            return RecordsFile(file_name, records, truncated=True)  # ran out before the "]"
-        if text[position] == "]":
-            return RecordsFile(file_name, records, truncated=False)
-        try:
-            record, position = decoder.raw_decode(text, position)
-        except json.JSONDecodeError:
-            return RecordsFile(file_name, records, truncated=True)
-        if isinstance(record, dict):
-            records.append(record)
+    """Read the whole `tallymessage` array into memory (small files and tests). A file
+    cut off mid-record yields all complete records before the cut with `truncated=True`."""
+    stream = RecordsStream(io.BytesIO(content), file_name)
+    records = list(stream.records)
+    return RecordsFile(file_name, records, stream.truncated)
 
 
 def kind_of(records: list[dict]) -> str:
@@ -129,6 +229,12 @@ class Master:
 
     ledger_parent: dict[str, str] = field(default_factory=dict)  # _key(ledger) -> _key(group)
     group_parent: dict[str, str] = field(default_factory=dict)  # _key(group) -> _key(group)
+    # Tally's own P&L flags on groups: 'affectsgrossprofit' (trading account) and 'isrevenue'.
+    gross_profit_groups: set[str] = field(default_factory=set)
+    revenue_groups: set[str] = field(default_factory=set)
+    # Ledger balances in the Master: opening balance, and dated closing values (closing stock).
+    opening: dict[str, Decimal] = field(default_factory=dict)  # _key(ledger) -> amount
+    closing: dict[str, dict[date, Decimal]] = field(default_factory=dict)
     _cache: dict[str, frozenset[str]] = field(default_factory=dict, repr=False)
 
     def ancestors(self, ledger: str) -> frozenset[str]:
@@ -148,6 +254,19 @@ class Master:
     def knows(self, ledger: str) -> bool:
         return _key(ledger) in self.ledger_parent
 
+    def profit_kind(self, ledger: str) -> str | None:
+        """'trading' (affects gross profit), 'pl' (other revenue) or None (balance sheet)."""
+        ancestors = self.ancestors(ledger)
+        if ancestors & self.gross_profit_groups:
+            return "trading"
+        if ancestors & self.revenue_groups:
+            return "pl"
+        return None
+
+    def stock_ledgers(self) -> list[str]:
+        """Ledgers under Stock-in-hand (their values are the opening / closing stock)."""
+        return [key for key in self.ledger_parent if _STOCK_KEY in self.ancestors(key)]
+
 
 def _record_name(record: dict) -> str | None:
     name = record.get("metadata", {}).get("name") or record.get("name")
@@ -159,7 +278,7 @@ def _record_name(record: dict) -> str | None:
     return _clean(name) if name else None
 
 
-def build_master(record_files: list[RecordsFile]) -> Master:
+def build_master(record_files: Iterable[RecordsFile | RecordsStream]) -> Master:
     master = Master()
     for file in record_files:
         for record in file.records:
@@ -168,8 +287,23 @@ def build_master(record_files: list[RecordsFile]) -> Master:
             parent = _clean(record["parent"]) if record.get("parent") else ""
             if not name or record_type not in ("Ledger", "Group"):
                 continue
-            target = master.ledger_parent if record_type == "Ledger" else master.group_parent
-            target[_key(name)] = _key(parent)
+            key = _key(name)
+            if record_type == "Group":
+                master.group_parent[key] = _key(parent)
+                if record.get("affectsgrossprofit") is True:
+                    master.gross_profit_groups.add(key)
+                if record.get("isrevenue") is True:
+                    master.revenue_groups.add(key)
+                continue
+            master.ledger_parent[key] = _key(parent)
+            opening = parse_amount(record.get("openingbalance") or 0)
+            if opening:
+                master.opening[key] = opening
+            for value in record.get("ledgerclosingvalues") or []:
+                when = _voucher_date(value) if isinstance(value, dict) else None
+                amount = parse_amount(value.get("amount")) if when else None
+                if when and amount is not None:
+                    master.closing.setdefault(key, {})[when] = amount
     return master
 
 
@@ -242,8 +376,31 @@ def _voucher_date(voucher: dict) -> date | None:
 
 
 @dataclass
+class ProfitParts:
+    """One FY's P&L totals from vouchers (credit +, debit -)."""
+
+    trading: Decimal = Decimal(0)
+    pl: Decimal = Decimal(0)
+    unknown: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True)
+class LedgerVoucher:
+    """Every ledger line of one posted voucher, kept for the TDS analysis (it needs expense,
+    TDS and party ledgers too, not only sales and purchases)."""
+
+    when: date
+    guid: str
+    type_name: str
+    number: str
+    party: str | None
+    entries: tuple[Entry, ...]
+
+
+@dataclass
 class JsonParseResult:
     vouchers: list[ParsedVoucher] = field(default_factory=list)
+    ledger_vouchers: list[LedgerVoucher] = field(default_factory=list)
     total_vouchers: int = 0
     excluded: Counter = field(default_factory=Counter)
     other_vouchers: int = 0  # posted, but not sales / purchase (receipts, payments, contra ...)
@@ -263,6 +420,7 @@ class JsonParseResult:
     truncated_files: list[str] = field(default_factory=list)
     excluded_cutoff_dates: set[date] = field(default_factory=set)
     duplicate_guid_vouchers: int = 0  # same voucher present in more than one Transactions file
+    profit_parts: dict[str, ProfitParts] = field(default_factory=dict)  # FY -> P&L totals
 
 
 def _quantize(value: Decimal) -> Decimal:
@@ -283,52 +441,162 @@ def _dedup_key(
     return make_dedup_key(voucher_type, effective_number, when, gross)
 
 
-def _emit(
-    result: JsonParseResult, kind: str, amount: Decimal, tax: Decimal, total: Decimal,
+def _record(
+    kind: str, amount: Decimal, tax: Decimal, total: Decimal,
     voucher: dict, when: date, position: int, party: str | None,
-) -> None:  # fmt: skip
-    """Append one sales / purchase record; a net-reversal becomes a credit / debit note."""
+) -> ParsedVoucher:  # fmt: skip
+    """One sales / purchase record; a net-reversal becomes a credit / debit note."""
     if kind == "sales":
         voucher_type = "sales" if amount >= 0 else "credit_note"
     else:
         voucher_type = "purchase" if amount >= 0 else "debit_note"
     taxable, tax_value, gross = (_quantize(abs(v)) for v in (amount, tax, total))
     number = str(voucher.get("vouchernumber") or "").strip()
-    result.vouchers.append(
-        ParsedVoucher(
-            voucher_type=voucher_type,
-            voucher_date=when,
-            voucher_no=number,
-            party=party,
-            taxable_value=taxable,
-            tax_value=tax_value,
-            total_value=gross,
-            fy=fy_label(when),
-            dedup_key=_dedup_key(voucher_type, number, when, gross, party),
-            source_row=position,
-        )
+    return ParsedVoucher(
+        voucher_type=voucher_type,
+        voucher_date=when,
+        voucher_no=number,
+        party=party,
+        taxable_value=taxable,
+        tax_value=tax_value,
+        total_value=gross,
+        fy=fy_label(when),
+        dedup_key=_dedup_key(voucher_type, number, when, gross, party),
+        source_row=position,
     )
 
 
-def parse_transactions(record_files: list[RecordsFile], master: Master) -> JsonParseResult:
+@dataclass
+class _Outcome:
+    """What one posted, dated voucher contributes to the result. Kept (instead of the
+    voucher itself) until the file's cut-off day is known, so memory stays small."""
+
+    when: date
+    type_name: str
+    gstin: Any
+    unreadable: int
+    unbalanced: bool
+    unknown: list[tuple[str, Decimal]]  # (ledger, abs amount) for ledgers not in the Master
+    mixed: bool
+    records: list[ParsedVoucher]
+    trading: Decimal = Decimal(0)  # net of ledgers in gross-profit groups (credit +)
+    pl: Decimal = Decimal(0)  # net of other revenue ledgers (indirect incomes / expenses)
+    unknown_net: Decimal = Decimal(0)  # net of ledgers missing from the Master
+    ledger_voucher: LedgerVoucher | None = None
+
+
+def _evaluate(voucher: dict, when: date, position: int, master: Master) -> _Outcome:
+    entries, unreadable = collect_entries(voucher)
+    unbalanced = abs(sum((e.amount for e in entries), Decimal(0))) > 1
+    unknown: list[tuple[str, Decimal]] = []
+    sales = purchase = tax = party_total = Decimal(0)
+    trading = pl = unknown_net = Decimal(0)
+    for entry in entries:
+        if not master.knows(entry.ledger):
+            unknown.append((entry.ledger, abs(entry.amount)))
+            unknown_net += entry.amount
+        else:
+            profit_kind = master.profit_kind(entry.ledger)
+            if profit_kind == "trading":
+                trading += entry.amount
+            elif profit_kind == "pl":
+                pl += entry.amount
+        kind = _ledger_kind(master, entry.ledger)
+        if kind == "sales":
+            sales += entry.amount  # credit (+) is a sale
+        elif kind == "purchase":
+            purchase -= entry.amount  # debit (-) is a purchase
+        elif kind == "tax":
+            tax += entry.amount
+        if entry.is_party:
+            party_total += entry.amount
+    party = str(voucher.get("partyledgername") or "").strip() or None
+    ledger_voucher = LedgerVoucher(
+        when=when,
+        guid=str(voucher.get("guid") or ""),
+        type_name=str(voucher.get("vouchertypename") or ""),
+        number=str(voucher.get("vouchernumber") or "").strip(),
+        party=_clean(party) if party else None,
+        entries=tuple(entries),
+    )
+
+    records: list[ParsedVoucher] = []
+    if sales != 0:
+        # tax on the sales side has the same sign as the sale; flip for a return
+        side_tax = tax if sales > 0 else -tax
+        gross = abs(party_total) if party_total else abs(sales) + abs(side_tax)
+        records.append(_record("sales", sales, side_tax, gross, voucher, when, position, party))
+    if purchase != 0:
+        side_tax = -tax if purchase > 0 else tax
+        gross = abs(party_total) if party_total and sales == 0 else abs(purchase) + abs(side_tax)
+        records.append(
+            _record("purchase", purchase, side_tax, gross, voucher, when, position, party)
+        )
+    return _Outcome(
+        when=when,
+        type_name=str(voucher.get("vouchertypename")),
+        gstin=voucher.get("cmpgstin"),
+        unreadable=unreadable,
+        unbalanced=unbalanced,
+        unknown=unknown,
+        mixed=sales != 0 and purchase != 0,
+        records=records,
+        trading=trading,
+        pl=pl,
+        unknown_net=unknown_net,
+        ledger_voucher=ledger_voucher,
+    )
+
+
+def _apply(result: JsonParseResult, outcome: _Outcome) -> None:
+    when = outcome.when
+    parts = result.profit_parts.setdefault(fy_label(when), ProfitParts())
+    parts.trading += outcome.trading
+    parts.pl += outcome.pl
+    parts.unknown += outcome.unknown_net
+    result.voucher_types[outcome.type_name] += 1
+    if outcome.ledger_voucher is not None:
+        result.ledger_vouchers.append(outcome.ledger_voucher)
+    if outcome.gstin:
+        result.gstins[outcome.gstin] += 1
+    result.first_date = min(result.first_date or when, when)
+    result.last_date = max(result.last_date or when, when)
+    result.unreadable_amounts += outcome.unreadable
+    if outcome.unbalanced:
+        result.unbalanced += 1
+    for ledger, amount in outcome.unknown:
+        result.unknown_ledgers.add(ledger)
+        result.unknown_ledger_lines[ledger] += 1
+        result.unknown_ledger_amounts[ledger] = (
+            result.unknown_ledger_amounts.get(ledger, Decimal(0)) + amount
+        )
+    if not outcome.records:
+        result.other_vouchers += 1
+        return
+    if outcome.mixed:
+        result.mixed += 1
+    result.vouchers.extend(outcome.records)
+
+
+def parse_transactions(
+    record_files: Iterable[RecordsFile | RecordsStream], master: Master
+) -> JsonParseResult:
     """Parse one or more Transactions files for the same company/period. When more than
     one file is given (e.g. two overlapping exports), vouchers are merged and de-duplicated
-    by their Tally `guid` - a later file's copy of a voucher already seen is skipped."""
+    by their Tally `guid` - a later file's copy of a voucher already seen is skipped.
+    Each file is read once, record by record."""
     result = JsonParseResult()
-    result.truncated_files = [f.file_name for f in record_files if f.truncated]
     position = 0
     seen_guids: set[str] = set()
     for file in record_files:
-        # A cut export may contain a few syntactically complete vouchers from
-        # its final day, while other vouchers from that same day are missing.
-        # Treat the entire terminal day as unreliable so comparisons never mix
-        # a partial day with a complete matching day in the other FY.
-        dates = [_voucher_date(record) for record in file.records]
-        cutoff_date = max((value for value in dates if value is not None), default=None)
-        has_prior_day = bool(
-            cutoff_date and any(value is not None and value < cutoff_date for value in dates)
-        )
+        outcomes: list[_Outcome] = []
+        first_day: date | None = None
+        last_day: date | None = None
         for voucher in file.records:
+            record_day = _voucher_date(voucher)
+            if record_day is not None:
+                first_day = min(first_day or record_day, record_day)
+                last_day = max(last_day or record_day, record_day)
             if voucher.get("metadata", {}).get("type") != "Voucher":
                 continue
             guid = voucher.get("guid")
@@ -345,62 +613,99 @@ def parse_transactions(record_files: list[RecordsFile], master: Master) -> JsonP
             if reason:
                 result.excluded[reason] += 1
                 continue
-            when = _voucher_date(voucher)
-            if when is None:
+            if record_day is None:
                 result.undated += 1
                 continue
-            if file.truncated and has_prior_day and when == cutoff_date:
-                result.excluded_cutoff_dates.add(when)
+            outcomes.append(_evaluate(voucher, record_day, position, master))
+
+        # A cut export may contain a few syntactically complete vouchers from
+        # its final day, while other vouchers from that same day are missing.
+        # Treat the entire terminal day as unreliable so comparisons never mix
+        # a partial day with a complete matching day in the other FY.
+        if file.truncated:
+            result.truncated_files.append(file.file_name)
+        drop_last_day = file.truncated and first_day is not None and first_day < last_day
+        for outcome in outcomes:
+            if drop_last_day and outcome.when == last_day:
+                result.excluded_cutoff_dates.add(outcome.when)
                 continue
-            result.voucher_types[str(voucher.get("vouchertypename"))] += 1
-            if voucher.get("cmpgstin"):
-                result.gstins[voucher["cmpgstin"]] += 1
-            result.first_date = min(result.first_date or when, when)
-            result.last_date = max(result.last_date or when, when)
-
-            entries, unreadable = collect_entries(voucher)
-            result.unreadable_amounts += unreadable
-            if abs(sum((e.amount for e in entries), Decimal(0))) > 1:
-                result.unbalanced += 1
-
-            sales = purchase = tax = party_total = Decimal(0)
-            for entry in entries:
-                if not master.knows(entry.ledger):
-                    result.unknown_ledgers.add(entry.ledger)
-                    result.unknown_ledger_lines[entry.ledger] += 1
-                    result.unknown_ledger_amounts[entry.ledger] = result.unknown_ledger_amounts.get(
-                        entry.ledger, Decimal(0)
-                    ) + abs(entry.amount)
-                kind = _ledger_kind(master, entry.ledger)
-                if kind == "sales":
-                    sales += entry.amount  # credit (+) is a sale
-                elif kind == "purchase":
-                    purchase -= entry.amount  # debit (-) is a purchase
-                elif kind == "tax":
-                    tax += entry.amount
-                if entry.is_party:
-                    party_total += entry.amount
-            party = str(voucher.get("partyledgername") or "").strip() or None
-
-            if sales == 0 and purchase == 0:
-                result.other_vouchers += 1
-                continue
-            if sales != 0 and purchase != 0:
-                result.mixed += 1
-            if sales != 0:
-                # tax on the sales side has the same sign as the sale; flip for a return
-                side_tax = tax if sales > 0 else -tax
-                gross = abs(party_total) if party_total else abs(sales) + abs(side_tax)
-                _emit(result, "sales", sales, side_tax, gross, voucher, when, position, party)
-            if purchase != 0:
-                side_tax = -tax if purchase > 0 else tax
-                gross = (
-                    abs(party_total)
-                    if party_total and sales == 0
-                    else abs(purchase) + abs(side_tax)
-                )
-                _emit(result, "purchase", purchase, side_tax, gross, voucher, when, position, party)
+            _apply(result, outcome)
     return result
+
+
+# ------------------------------------------------------------ gross / net profit
+
+UNKNOWN_LEDGER_SHARE = Decimal("0.05")  # hold NP back when missing ledgers exceed 5% of it
+
+
+@dataclass
+class ProfitFigures:
+    """Gross / net profit derived for one FY, or None with the reason in `notes`."""
+
+    fy: str
+    gross_profit: Decimal | None
+    net_profit: Decimal | None
+    opening_stock: Decimal | None = None
+    closing_stock: Decimal | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def _stock_values(master: Master, fy: str) -> tuple[Decimal, Decimal] | str:
+    """(opening, closing) stock for an FY from the Stock-in-hand ledgers, or the reason
+    they are not available. Stock is a debit balance, exported as a negative amount."""
+    start, end = date(int(fy[:4]), 4, 1), date(int(fy[:4]) + 1, 3, 31)
+    opening = closing = Decimal(0)
+    for key in master.stock_ledgers():
+        values = master.closing.get(key, {})
+        if end not in values:
+            return f"closing stock at {end:%d-%b-%Y} is not in the Master file"
+        closing -= values[end]
+        # the previous year-end value if present, else the Master's opening balance
+        opening -= values.get(start - timedelta(days=1), master.opening.get(key, Decimal(0)))
+    return opening, closing
+
+
+def derive_profits(
+    result: JsonParseResult, master: Master, today: date | None = None
+) -> list[ProfitFigures]:
+    """Tally's P&L: GP = trading-account ledgers + closing stock - opening stock;
+    NP = GP + all other revenue ledgers (indirect incomes / expenses, including custom
+    revenue groups such as appropriations). Only for one complete, finished FY."""
+    today = today or date.today()
+    fys = sorted(result.profit_parts)
+    if len(fys) != 1:
+        note = "Profit is worked out only when the files hold exactly one financial year."
+        return [ProfitFigures(fy, None, None, notes=[note]) for fy in fys]
+    fy = fys[0]
+    parts = result.profit_parts[fy]
+    end = date(int(fy[:4]) + 1, 3, 31)
+    if result.truncated_files:
+        return [ProfitFigures(fy, None, None, notes=["The Transactions file is cut off."])]
+    if today <= end:
+        return [ProfitFigures(fy, None, None, notes=["The year is not finished yet."])]
+    months = {(v.voucher_date.year, v.voucher_date.month) for v in result.vouchers}
+    if len(months) <= 6:  # same rule as the part-year warning
+        note = f"Only {len(months)} month(s) of trading in the files, so this is not a full year."
+        return [ProfitFigures(fy, None, None, notes=[note])]
+    notes: list[str] = []
+    if master.stock_ledgers():
+        stock = _stock_values(master, fy)
+        if isinstance(stock, str):
+            return [ProfitFigures(fy, None, None, notes=[f"Gross profit needs stock: {stock}."])]
+        opening, closing = stock
+    else:
+        opening = closing = Decimal(0)
+        notes.append("No stock ledger in Tally, so gross profit excludes stock.")
+    gross = _quantize(parts.trading + closing - opening)
+    net: Decimal | None = _quantize(gross + parts.pl)
+    gap = abs(parts.unknown)
+    if gap and (net == 0 or gap > abs(net) * UNKNOWN_LEDGER_SHARE):
+        notes.append(
+            f"Net profit not stored: Rs {gap:,.2f} is on ledgers missing from the Master file "
+            f"(more than {UNKNOWN_LEDGER_SHARE:.0%} of the net profit of Rs {net:,.2f})."
+        )
+        net = None
+    return [ProfitFigures(fy, gross, net, _quantize(opening), _quantize(closing), notes)]
 
 
 # ------------------------------------------------------------------ warnings

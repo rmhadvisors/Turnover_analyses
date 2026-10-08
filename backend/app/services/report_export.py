@@ -235,8 +235,48 @@ def _monthly_sheet(wb: Workbook, monthly: MonthlyComparison, fy: str, previous_f
         ws.add_chart(chart, anchor)
 
 
+TDS_BLOCK_LINES = (
+    ("Parties that crossed a TDS threshold", "parties_crossed", False),
+    ("TDS payable on them", "tds_payable", True),
+    ("TDS deducted", "tds_deducted", True),
+    ("TDS not deducted (shortfall)", "not_deducted", True),
+    ("Parties with no TDS deducted", "parties_not_deducted", False),
+    ("Parties short deducted", "parties_short", False),
+)
+
+
+def tds_block_note(tds: dict) -> str | None:
+    if not tds["mapping_approved"]:
+        return "Ledger mapping not yet approved (Settings -> TDS): figures are provisional."
+    if tds["unmapped_ledgers"]:
+        return f"{tds['unmapped_ledgers']} ledger(s) with postings are not mapped to a TDS section."
+    return None
+
+
+def _tds_sheet(wb: Workbook, tds: dict, fy: str) -> None:
+    ws = wb.create_sheet("TDS")
+    _text(ws, "A1", f"TDS SUMMARY – FY {fy}", Font(bold=True, size=13))
+    _header_row(ws, 3, ["", "Value"])
+    for i, (label, key, money) in enumerate(TDS_BLOCK_LINES, start=4):
+        ws.cell(row=i, column=1, value=label).border = _BOX
+        if money:
+            _put_money(ws, i, 2, Decimal(tds[key]), "full")
+        else:
+            ws.cell(row=i, column=2, value=tds[key]).border = _BOX
+    note = tds_block_note(tds)
+    if note:
+        ws.cell(row=4 + len(TDS_BLOCK_LINES) + 1, column=1, value=note).font = Font(
+            italic=True, color="B42318"
+        )
+    ws.column_dimensions["A"].width = 42
+    ws.column_dimensions["B"].width = 20
+
+
 def client_report_xlsx(
-    report: ClientComparison, monthly: MonthlyComparison | None, unit: str = "auto"
+    report: ClientComparison,
+    monthly: MonthlyComparison | None,
+    unit: str = "auto",
+    tds: dict | None = None,
 ) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -244,6 +284,8 @@ def client_report_xlsx(
     _comparison_sheet(ws, report, unit)
     if monthly is not None and monthly.has_data:
         _monthly_sheet(wb, monthly, report.fy, report.previous_fy)
+    if tds is not None and tds["has_data"]:
+        _tds_sheet(wb, tds, report.fy)
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -258,7 +300,8 @@ def summary_xlsx(rows: list[SummaryRow], fy: str, unit: str = "auto") -> bytes:
     ws["A2"] = f"Sorted by size of turnover change. Generated {datetime.now():%d-%b-%Y %H:%M}."
     ws["A2"].font = Font(italic=True, color="5F6368")
     headers = ["Client", "Previous FY turnover", "Current FY turnover", "Change %", "Status",
-               "Net profit flag", "Limits crossed", "Limits approaching", "Open alerts"]  # fmt: skip
+               "Net profit flag", "Limits crossed", "Limits approaching", "Open alerts",
+               "TDS: parties crossed", "TDS payable", "TDS not deducted"]  # fmt: skip
     _header_row(ws, 4, headers)
     ordered = sorted(rows, key=lambda r: (r.change_pct is None, -abs(r.change_pct or 0)))
     for i, row in enumerate(ordered):
@@ -285,9 +328,20 @@ def summary_xlsx(rows: list[SummaryRow], fy: str, unit: str = "auto") -> bytes:
             ws.cell(row=r, column=col, value=value).alignment = Alignment(horizontal="center")
         for col in (5, 6, 7, 8, 9):
             ws.cell(row=r, column=col).border = _BOX
-    ws.auto_filter.ref = f"A4:I{4 + len(ordered)}"
+        crossed = ws.cell(
+            row=r,
+            column=10,
+            value=row.tds_parties_crossed if row.tds_parties_crossed is not None else "—",
+        )
+        crossed.alignment, crossed.border = Alignment(horizontal="center"), _BOX
+        _put_money(ws, r, 11, row.tds_payable, unit)
+        shortfall = _put_money(ws, r, 12, row.tds_not_deducted, unit)
+        if row.tds_not_deducted:
+            shortfall.font = Font(bold=True, color=STATUS_TEXT["critical"])
+    ws.auto_filter.ref = f"A4:L{4 + len(ordered)}"
     ws.freeze_panes = "B5"
-    for col, width in zip("ABCDEFGHI", (30, 20, 20, 12, 26, 18, 14, 18, 12), strict=True):
+    widths = (30, 20, 20, 12, 26, 18, 14, 18, 12, 14, 18, 18)
+    for col, width in zip("ABCDEFGHIJKL", widths, strict=True):
         ws.column_dimensions[col].width = width
     ws.page_setup.orientation = "landscape"
     buffer = io.BytesIO()
@@ -459,8 +513,31 @@ def _comparison_table(report: ClientComparison, unit: str, styles) -> Table:
     return table
 
 
+def _tds_pdf_block(tds: dict, styles) -> list:
+    rows = [
+        [label, format_indian(Decimal(tds[key]), "full") if money else str(tds[key])]
+        for label, key, money in TDS_BLOCK_LINES
+    ]
+    table = Table(rows, colWidths=[90 * mm, 45 * mm])
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"), ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BFC3C7")),
+        ("TEXTCOLOR", (1, 3), (1, 3), colors.HexColor(f"#{STATUS_TEXT['critical']}")),
+    ]))  # fmt: skip
+    block = [Paragraph("TDS summary", styles["h2"]), table]
+    note = tds_block_note(tds)
+    if note:
+        block.append(Paragraph(escape(note), styles["small"]))
+    block.append(Paragraph("Party-wise detail: the TDS Applicability report.", styles["small"]))
+    return [KeepTogether(block)]
+
+
 def client_report_pdf(
-    report: ClientComparison, monthly: MonthlyComparison | None, unit: str = "auto"
+    report: ClientComparison,
+    monthly: MonthlyComparison | None,
+    unit: str = "auto",
+    tds: dict | None = None,
 ) -> bytes:
     _register_fonts()
     styles = _styles()
@@ -511,6 +588,8 @@ def client_report_pdf(
             styles["small"],
         )
     )
+    if tds is not None and tds["has_data"]:
+        story += _tds_pdf_block(tds, styles)
 
     if monthly is not None and monthly.has_data:
         axis = _nice_axis(monthly)

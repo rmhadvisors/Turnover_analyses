@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,6 +23,35 @@ def list_figures(db: Session, client_id: int) -> list[YearlyFigures]:
         select(YearlyFigures).where(YearlyFigures.client_id == client_id).order_by(YearlyFigures.fy)
     )
     return list(db.scalars(query))
+
+
+PROFIT_SOURCES_KEPT = ("manual", "pl_import")  # never overwritten by derived figures
+
+
+def store_derived_profit(
+    db: Session, client_id: int, fy: str, gross: Decimal | None, net: Decimal | None
+) -> bool:
+    """Save GP / NP worked out from a Tally export, unless the year already has profit
+    entered manually or from a P&L import. Returns True when stored."""
+    row = get_figures(db, client_id, fy)
+    if row is not None and row.profit_source in PROFIT_SOURCES_KEPT:
+        if row.gross_profit is not None or row.net_profit is not None:
+            return False
+    if row is None:
+        row = YearlyFigures(client_id=client_id, fy=fy, is_manual=False)
+        db.add(row)
+    row.gross_profit, row.net_profit, row.profit_source = gross, net, "tally_json"
+    db.flush()
+    return True
+
+
+def list_all(db: Session) -> list[YearlyFigures]:
+    return list(db.scalars(select(YearlyFigures)))
+
+
+def all_fys(db: Session) -> set[str]:
+    """Every FY with yearly figures for any client."""
+    return set(db.scalars(select(YearlyFigures.fy).distinct()))
 
 
 def upsert_figures(

@@ -14,6 +14,7 @@ LIMIT_STYLE = {
 }
 SEVERITY_STYLE = {
     "critical": ("🔴", "#b42318"),
+    "high": ("🟠", "#c4320a"),
     "warning": ("🟡", "#a15c07"),
     "info": ("🟢", "#137333"),
 }
