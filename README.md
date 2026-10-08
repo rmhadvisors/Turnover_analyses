@@ -12,8 +12,8 @@ crosses one. Built for a CA practice that exports data from Tally (TallyPrime / 
 
 ## Install and run
 
-You need Python 3.11+. Run the backend and the frontend in two terminals; each has its own
-`requirements.txt` and virtual environment.
+You need Python 3.11+ for the backend. Run the backend and the frontend in two terminals; each has
+its own `requirements.txt` and virtual environment.
 
 **Backend** (http://localhost:8000, interactive API docs at `/docs`)
 
@@ -30,14 +30,39 @@ The SQLite database is created on first start and pre-filled with the default ab
 
 **Frontend** (http://localhost:8501)
 
+Use **Python 3.12** (pinned in `frontend/.python-version`), not 3.13/3.14 - pandas' compiled
+wheels for very new Python releases are the most likely to be blocked by Windows Application
+Control / Smart App Control (see Troubleshooting below), and are the least tested by pandas
+itself.
+
 ```bash
 cd frontend
-python -m venv .venv
+py -3.12 -m venv .venv          # Windows; use `python3.12 -m venv .venv` on macOS/Linux
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env            # set BACKEND_URL if the API is not on localhost:8000
+copy .env.example .env            # set BACKEND_URL if the API is not on 127.0.0.1:8000
 streamlit run app.py
 ```
+
+**Troubleshooting: `AttributeError: partially initialized module 'pandas' ...`**
+
+If the Clients or Dashboard page fails with a pandas import error that mentions a "circular
+import", the real cause is almost always that a pandas `.pyd` file failed to load - Windows raises
+this exact misleading message whenever pandas' C extension partially fails to initialise for any
+reason. Check, in order:
+
+1. **Windows Application Control / Smart App Control blocked the file.** Look in *Windows
+   Security -> App & browser control* (and *Protection history*) for a block naming one of
+   pandas' `_libs` `.pyd` files (e.g. `timedeltas`, `ops_dispatch`). Smart App Control has no
+   per-file allow-list, so the only fix is turning it off (device-wide) or - on a managed machine
+   - asking your IT admin to allow it through a WDAC policy.
+2. **Wrong Python version.** Confirm the venv is on Python 3.12 (`python --version` inside the
+   activated venv) - see above.
+3. **A local file shadowing pandas.** Make sure there is no `pandas.py`, `numpy.py` or `pandas/`
+   folder anywhere in `frontend/` outside `.venv`.
+
+If pandas still won't import after that, the page shows a friendly error instead of a raw
+traceback; the full traceback is still printed to the terminal running `streamlit run`.
 
 **Tests and lint** (backend)
 
@@ -50,12 +75,12 @@ black --check app tests
 
 ## Try it with the sample data
 
-1. Start both services, open **Clients** and add "Sharma Traders".
-2. **Import Tally Data** -> pick the client -> *Sales Register* -> upload
+1. Start both services, open **Clients** and add "Sharma Traders" (it becomes the sidebar client).
+2. **Data** -> *Tally import* -> open *Other formats* -> *Sales Register* -> upload
    `sample_data/sharma_traders_sales_register.xlsx` -> check the preview -> **Confirm import**.
    Repeat with the *Purchase Register* and the two *Profit & Loss* files.
-3. **Client Report** shows FY 2025-26 vs 2024-25 (turnover +25%, net profit -28.57%);
-   **Summary** compares all clients; **Alerts** lists what fired.
+3. **Clients** (with the client selected) shows FY 2025-26 vs 2024-25 (turnover +25%, net profit
+   -28.57%); **Dashboard** compares all clients; **Alerts** lists what fired.
 4. Import the same file again: every voucher is reported as a skipped duplicate.
 
 `python sample_data/generate_samples.py` regenerates the sample files identically.
@@ -96,9 +121,12 @@ reliably, and the one to use if the Excel/CSV registers are unwieldy for a busy 
    together on the Import screen, and it merges and de-duplicates them automatically (a voucher
    that ends up in two of the files is only counted once).
 
-**On the Import Tally Data screen**, choose *Tally JSON export*, pick the client, and select the
-Master file (or files) and the Transactions file (or files) together - all from the same company
-and year; the order does not matter. The tool then:
+**On the Data page** (*Tally import* tab), with the client chosen in the sidebar, select the
+Master file and ONE financial year's Transactions file together (Ctrl+click both) - from the same
+company; the order does not matter. The year is detected from the voucher dates and shown before
+you confirm; if that year was imported before you choose to add only new vouchers, replace the
+year's imported data, or skip it. Repeat for each year. Files up to 1 GB are read as a stream,
+with a progress bar. The tool then:
 
 - reads the Master to learn which ledgers belong to *Sales Accounts*, *Purchase Accounts* and
   *Duties & Taxes* (matched ignoring case and stray spaces, so "Sales GST @ 18%" and
@@ -135,23 +163,43 @@ only the matching part of both years instead (labelled, for example, "Comparison
 
 ## Reading reports and alerts
 
-- **Client Report**: pick a client and FY. The table shows Turnover, Purchases, Gross Profit and
+The sidebar is the one place to choose the client and financial year; every page uses them.
+
+- **Clients** -> pick a client (sidebar, or a row in the directory) -> *Report*. The table shows Turnover, Purchases, Gross Profit and
   Net Profit for that year and the previous one, with the difference, the change %, and a
   coloured status (🟢 Normal, 🟡 Moderate, 🔴 Significant). Below it, any absolute-limit alert
   (e.g. "Sales turnover crossed Tax audit u/s 44AB... on 14-Jan-2026 (voucher S-0090)") names the
   date and voucher on which the limit was crossed. The chart underneath compares month-by-month
   sales and purchases for the two years side by side.
-- **Summary**: one row per client, sorted by the size of the turnover change, so the biggest
-  movers are at the top - use this to see at a glance which clients need a closer look.
+- **Dashboard**: KPIs and one row per client for the sidebar's FY (clients without data show
+  "No data"), with a filter for clients that need attention, a chart and CSV / Excel export.
+- **Data coverage** (Clients -> *Data coverage*, or the directory grid): which years each client
+  has Tally imports, manual figures or nothing yet.
 - **Alerts**: every status change (e.g. Normal → Significant Increase, or Approaching → Crossed)
   is logged here with the old and new status, filterable by client, financial year and severity.
-  An alert stays "open" until you tick Acknowledge; the sidebar badge counts open alerts across
-  all clients. Importing the same data again does not create repeat alerts - only an actual change
+  An alert stays "open" until you tick Acknowledge; the sidebar badge ("N unacknowledged (all
+  clients)") counts open critical and warning alerts across all clients and years. Importing the same data again does not create repeat alerts - only an actual change
   in status raises a new one.
+
+## Gross / net profit and client profiles
+
+- **GP / NP from Tally**: a Tally JSON import also works out Gross Profit (trading-account ledgers
+  plus closing minus opening stock) and Net Profit (all other revenue ledgers), exactly as Tally's
+  P&L groups them, for one finished financial year. Figures typed manually or imported from a P&L
+  file are never replaced. Net profit is held back when ledgers missing from the Master exceed 5%
+  of it; the import review shows why.
+- **Client profile** (Clients -> client -> *Profile*): GSTIN, state, registration and entity type
+  fill in from an import; nature of work, supplies, presumptive scheme and the 5% cash condition
+  are chosen by you. Each statutory limit has an "Applies to" rule (see Settings); limits that do
+  not apply are not checked and their open alerts are acknowledged as "System - not applicable to
+  client profile". A field left Unknown never switches a limit off.
+- **TDS u/s 194Q purchases** is checked per seller (cash purchases excluded), only for buyers whose
+  previous-year turnover exceeded Rs 10 crore.
 
 ## Changing thresholds
 
-Open **Settings / Thresholds**.
+Open **Settings**. Statutory limits are one editable table: edit cells and **Save changes**, or
+tick *Select* on rows and **Delete selected** (you confirm before anything is deleted).
 
 - **Percentage bands**: the Moderate (default 5%) and Significant (default 20%) limits. A value
   must go *beyond* a limit to enter the next band (exactly +20% is still Moderate).
@@ -165,7 +213,7 @@ re-importing does not repeat them.
 
 ## Reports and exports
 
-**Client Report** (screen) shows the comparison table, absolute-limit alerts, a month-wise sales vs
+The client **Report** (Clients page) shows the comparison table, absolute-limit alerts, a month-wise sales vs
 purchases chart for the current and previous FY (shared axis, with a table view), and the client's
 alerts. Choose the amount unit (auto / lakhs / crores / full Indian commas) in the sidebar.
 
@@ -179,6 +227,55 @@ alerts. Choose the amount unit (auto / lakhs / crores / full Indian commas) in t
 
 The PDF uses the bundled DejaVu Sans font (`backend/app/assets/fonts/`, licence included) because
 the standard PDF fonts have no ₹ sign.
+
+## TDS applicability and threshold alerts (194C, 194H, 194J, 194Q, 194I)
+
+Spec: `docs/TDS_Applicability_Threshold_194C_194H_194J_194Q_194I.xlsx`. Party-wise, from the
+Tally JSON export: every ledger line of every posted voucher is kept (table `tds_entries`,
+separate from the turnover vouchers, so turnover figures never change).
+
+1. **Rate master** (Settings → TDS): thresholds and rates per section with an effective-from date.
+   The sheet's values apply from 01.04.2025; the earlier limits are kept for FY 2024-25 and before.
+   The rules that are law (the "exceeds" test, 194C's two tests, 194Q's excess-only base, no PAN →
+   the higher of the normal and s.206AA rate) are code in `services/tds_engine.py`.
+2. **Who must deduct** (Settings → TDS → client): 194Q if last year's turnover exceeded ₹10 Cr;
+   194C/H/J/I always for a non-individual, and for an Individual/HUF only if liable to audit u/s
+   44AB last year. The constitution comes from the 4th character of the PAN inside the client's
+   GSTIN; both it and the audit answer can be overridden.
+3. **Ledger mapping** (Settings → TDS → client): every expense, purchase and TDS/TCS ledger gets a
+   proposed role and section. **Review it and press Approve**: TDS alerts for a client start only
+   after approval. Ledgers with postings that are not mapped are listed, never ignored.
+4. **Analysis**: payments are grouped per party (by the Tally ledger guid) and section; PAN comes
+   from an entered PAN, else the party's GSTIN, else Tally's PAN field. TDS actually deducted is
+   read from the TDS ledgers; TDS booked in a voucher with no party (monthly lump-sum journals) is
+   allocated to the section's parties that are short, and labelled as such.
+5. **Alerts**: 🔴 not deducted, 🟠 short deducted, 🟡 approaching (default 80%), 🟢 correctly
+   deducted (hidden by default). Select a TDS alert on the Alerts page for the full working:
+   party, why the section applies, threshold test, calculation, vouchers, compliance and
+   consequences, and the actions (acknowledge, deducted outside Tally, party flags, export).
+6. **Reports**: Clients → TDS tab (TDS Applicability, Excel / PDF); a TDS block on the client
+   report and TDS columns on the Dashboard / Summary.
+
+Further rules:
+
+- **TDS analysis year** (Settings → TDS, default 2025-26): TDS is analysed and alerted for this
+  one FY only, from that year's vouchers (1 April - 31 March). The year before is used only to
+  decide who must deduct. Move it forward each year; alerts of other years are closed.
+- **Rent**: every rent ledger needs an explicit 194I(a) (machinery, 2%) or 194I(b) (building, 10%)
+  choice (tick *Rent: confirm section*) before the mapping can be approved. An Individual/HUF
+  not liable to audit is tested u/s **194-IB** instead (rent > ₹50,000 a month, 2%, once a year).
+- **Payments with no party ledger** over a threshold raise a 🟠 "cannot determine - payee
+  unidentified" alert; assign the payee (e.g. the landlord) from the alert's detail panel.
+- **TDS booked without a party** (lump-sum journals) is counted for a party only when it is the
+  one party over that section's threshold; otherwise it stays "unallocated" and never turns a
+  red status green. Over-deduction is reported 🔵 with its likely cause; the rounding tolerance
+  is at most ₹100.
+- **Data quality**: parties whose PAN contradicts their name (Pvt Ltd with a firm's PAN, etc.)
+  are listed on Settings → TDS - a wrong PAN in Form 26Q means 20% u/s 206AA.
+
+Clients imported before this feature: re-import their Tally JSON files (duplicates are skipped,
+turnover is unchanged), or capture only the TDS data with
+`python -m app.tools.backfill_tds "CLIENT NAME" Master.json Transactions.json` from `backend/`.
 
 ## Status
 
