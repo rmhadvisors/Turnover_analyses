@@ -50,7 +50,7 @@ _CHOICES = ("gst_registered", "special_category", "entity_type", "nature", "supp
 
 
 def _profile_read(client_id: int, profile) -> ProfileRead:
-    values = {name: getattr(profile, name, None) for name in ("gstin", "state_code", *_CHOICES)}
+    values = {name: getattr(profile, name, None) for name in ("gstin", "pan", "state_code", *_CHOICES)}
     facts = parse_gstin(values["gstin"])
     return ProfileRead(
         client_id=client_id,
@@ -75,6 +75,7 @@ def save_profile(
     values = body.model_dump()
     facts = parse_gstin(body.gstin)
     values["state_code"] = facts.state_code if facts else None
+    values["pan"] = body.pan or (facts.gstin[2:12] if facts else None)
     profile = profile_repo.save_profile(db, client.id, values)
     evaluate_client(db, client.id, fys_with_data(db, client.id))
     db.commit()

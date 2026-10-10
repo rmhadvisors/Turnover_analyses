@@ -18,6 +18,7 @@ class ClientProfile(Base):
         ForeignKey("clients.id", ondelete="CASCADE"), primary_key=True
     )
     gstin: Mapped[str | None] = mapped_column(String(15))
+    pan: Mapped[str | None] = mapped_column(String(10))
     state_code: Mapped[str | None] = mapped_column(String(2))
     gst_registered: Mapped[bool | None] = mapped_column(Boolean)
     special_category: Mapped[bool | None] = mapped_column(Boolean)

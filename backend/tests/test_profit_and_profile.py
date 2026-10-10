@@ -1,5 +1,5 @@
 """Gross / net profit derived from Tally exports, client profiles deciding which limits
-apply, and the per-seller 194Q check (synthetic data only)."""
+apply, the per-seller purchase check and the start-up upgrade (synthetic data only)."""
 
 from datetime import date
 from decimal import Decimal
@@ -8,9 +8,17 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.migrations import SYSTEM_PER_SELLER, upgrade
-from app.models import AbsoluteLimit, AbsoluteLimitMetric, Alert, Client
+from app.migrations import SYSTEM_TDS_MOVED, upgrade
+from app.models import (
+    AbsoluteLimit,
+    AbsoluteLimitMetric,
+    Alert,
+    Client,
+    ClientProfile,
+    YearlyFigures,
+)
 from app.repositories import figures_repo, threshold_repo
+from app.repositories.seed_data import REMOVED_TDS_LIMITS
 from app.services import applicability as ap
 from app.services import tally_json as tj
 from app.services.recheck_service import SYSTEM_NOT_APPLICABLE
@@ -162,16 +170,34 @@ def test_rules_unknown_fields_never_exclude_a_limit() -> None:
     assert ap.describe(rule) == "not GST-registered · supplies: goods/both"
 
 
-def test_tds_rule_uses_entity_and_previous_year_audit() -> None:
-    rule = ap.DEFAULT_RULES["TDS u/s 194C - contractors"]
-    person = type("P", (), {"entity_type": "individual", "nature": "business"})()
-    assert not ap.applies(rule, ap.context(person, Decimal(5_000_000)))  # not audited last year
-    assert ap.applies(rule, ap.context(person, Decimal(20_000_000)))  # audited u/s 44AB
-    firm = type("P", (), {"entity_type": "firm"})()
-    assert ap.applies(rule, ap.context(firm, Decimal(1)))
+def test_narrow_limits_stay_off_until_the_profile_says_they_apply() -> None:
+    """LLP audit and 44ADA concern only LLPs / professionals: an unknown entity type or
+    nature must not raise them (e.g. for a proprietorship trading business)."""
     llp_rule = ap.DEFAULT_RULES["LLP audit"]
+    unknown = type("P", (), {})()
+    firm = type("P", (), {"entity_type": "firm"})()
+    assert not ap.applies(llp_rule, ap.context(unknown, None))
     assert not ap.applies(llp_rule, ap.context(firm, None))
     assert ap.applies(llp_rule, ap.context(type("P", (), {"entity_type": "llp"})(), None))
+
+    adar = ap.DEFAULT_RULES["Presumptive taxation u/s 44ADA - professionals (standard)"]
+    trader = type("P", (), {"entity_type": "individual", "gst_registered": True})()
+    assert not ap.applies(adar, ap.context(trader, None))  # nature unknown: not a professional
+    business = type("P", (), {"nature": "business"})()
+    assert not ap.applies(adar, ap.context(business, None))
+    doctor = type("P", (), {"nature": "profession"})()
+    assert ap.applies(adar, ap.context(doctor, None))
+    opted = type("P", (), {"presumptive": "44ADA"})()
+    assert ap.applies(adar, ap.context(opted, None))
+    # broad limits keep the old rule: an unknown field never switches them off
+    assert ap.applies(ap.DEFAULT_RULES["Tax audit u/s 44AB - business (standard)"], ap.context(trader, None))
+    assert ap.describe(llp_rule) == "entity type: llp · entity type set in the profile"
+
+
+def test_no_tds_section_is_seeded_as_a_turnover_limit() -> None:
+    names = {row["name"] for row in threshold_repo.DEFAULT_LIMITS}
+    assert not any(code in name for name in names for code in ("194C", "194H", "194I", "194J", "194Q"))
+    assert not set(REMOVED_TDS_LIMITS) & set(ap.DEFAULT_RULES)
 
 
 def test_gstin_gives_state_registration_and_entity() -> None:
@@ -223,7 +249,7 @@ def test_profile_api_closes_alerts_of_limits_that_no_longer_apply(api) -> None:
 def test_limits_show_who_they_apply_to_and_updates_keep_the_rule(api) -> None:
     limits = api.get("/thresholds/limits").json()
     llp = next(limit for limit in limits if limit["name"] == "LLP audit")
-    assert llp["applies_to"] == "entity type: llp"
+    assert llp["applies_to"] == "entity type: llp · entity type set in the profile"
     body = {k: llp[k] for k in ("name", "metric", "amount", "approaching_pct", "fy_scope", "description", "is_enabled")}
     body["amount"] = "4000000"
     updated = api.put(f"/thresholds/limits/{llp['id']}", json=body).json()
@@ -250,29 +276,56 @@ def test_194q_counts_purchases_per_seller_without_cash() -> None:
 # ------------------------------------------------------------------ migration
 
 
-def test_upgrade_adds_columns_rules_and_moves_194q_to_per_seller(tmp_path) -> None:
+def test_upgrade_removes_tds_limits_and_closes_their_alerts(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         threshold_repo.seed_defaults(db)
-        q = db.query(AbsoluteLimit).filter_by(name="TDS u/s 194Q - purchases of goods").one()
-        q.metric = AbsoluteLimitMetric.PURCHASE_TURNOVER  # as in a database from before
-        db.add(Client(id=1, name="Old Co"))
+        tds = AbsoluteLimit(name="TDS u/s 194C - contractors", is_default_seed=True,
+                            metric=AbsoluteLimitMetric.SALES_TURNOVER, amount=Decimal(5_000_000))  # fmt: skip
+        adar = db.query(AbsoluteLimit).filter(AbsoluteLimit.name.like("%44ADA%standard%")).one()
+        adar.applies_when = ap.OLD_DEFAULT_RULES[adar.name]  # as seeded before
+        db.add_all([tds, Client(id=1, name="Proprietor Co")])
         db.flush()
-        db.add(Alert(client_id=1, fy="2025-26", metric=f"limit:{q.id}:purchase_turnover",
-                     new_status="crossed", value=Decimal(1)))  # fmt: skip
+        db.add(ClientProfile(client_id=1, entity_type="individual", gst_registered=True))
+        db.add(YearlyFigures(client_id=1, fy="2025-26", turnover=Decimal(48_000_000)))
+        for limit in (tds, adar):
+            db.add(Alert(client_id=1, fy="2025-26", metric=f"limit:{limit.id}:sales_turnover",
+                         new_status="crossed", value=Decimal(1)))  # fmt: skip
+        tds_id = tds.id
         db.commit()
     with engine.begin() as connection:  # simulate the old schema
         connection.execute(text("ALTER TABLE yearly_figures DROP COLUMN profit_source"))
-        connection.execute(text("ALTER TABLE absolute_limits DROP COLUMN applies_when"))
+        connection.execute(text("ALTER TABLE clients DROP COLUMN tally_company_id"))
 
     upgrade(engine)
     upgrade(engine)  # idempotent
-    columns = {c["name"] for c in inspect(engine).get_columns("absolute_limits")}
-    assert "applies_when" in columns
+    assert "tally_company_id" in {c["name"] for c in inspect(engine).get_columns("clients")}
     with Session(engine) as db:
-        q = db.query(AbsoluteLimit).filter_by(name="TDS u/s 194Q - purchases of goods").one()
-        assert q.metric == AbsoluteLimitMetric.PURCHASE_PER_SELLER
-        assert q.applies_when == ap.DEFAULT_RULES[q.name]
-        old = db.query(Alert).one()
-        assert old.acknowledged and old.acknowledged_by == SYSTEM_PER_SELLER
+        assert db.get(AbsoluteLimit, tds_id) is None
+        names = [limit.name for limit in db.query(AbsoluteLimit)]
+        assert not any("194" in name for name in names)
+        moved = db.query(Alert).filter(Alert.metric.like(f"limit:{tds_id}:%")).one()
+        assert moved.acknowledged and moved.acknowledged_by == SYSTEM_TDS_MOVED
+        adar = db.query(AbsoluteLimit).filter(AbsoluteLimit.name.like("%44ADA%standard%")).one()
+        assert adar.applies_when == ap.DEFAULT_RULES[adar.name]
+        closed = db.query(Alert).filter(Alert.metric.like(f"limit:{adar.id}:%")).one()
+        assert closed.acknowledged and closed.acknowledged_by == SYSTEM_NOT_APPLICABLE
+
+
+def test_deleting_a_limit_closes_its_alerts_and_drops_them_from_the_report(api) -> None:
+    client_id = make_client(api, "Report Co")
+    body = {"client_id": client_id, "previous_fy": "2024-25", "current_fy": "2025-26",
+            "previous_turnover": "5000000", "current_turnover": "15000000"}  # fmt: skip
+    api.post("/entries", json=body)
+    audit = next(l for l in api.get("/thresholds/limits").json() if l["name"].startswith("Tax audit u/s 44AB - business (standard)"))
+    report = api.get(f"/reports/client/{client_id}", params={"fy": "2025-26"}).json()
+    assert any(a["metric"].startswith(f"limit:{audit['id']}:") for a in report["alerts"])
+
+    assert api.delete(f"/thresholds/limits/{audit['id']}").status_code == 204
+    alerts = api.get("/alerts", params={"client_id": client_id}).json()
+    gone = [a for a in alerts if a["metric"].startswith(f"limit:{audit['id']}:")]
+    assert gone and all(a["acknowledged"] for a in gone)  # kept in the history, closed
+    report = api.get(f"/reports/client/{client_id}", params={"fy": "2025-26"}).json()
+    assert not any(a["metric"].startswith(f"limit:{audit['id']}:") for a in report["alerts"])
+    assert not any("44AB - business (standard)" in l["message"] for l in report["comparison"]["limits"])

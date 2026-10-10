@@ -14,6 +14,13 @@ class SettingsRead(BaseModel):
     moderate_pct: Decimal
     significant_pct: Decimal
     include_gst_in_turnover: bool
+    max_unmatched_ledger_pct: Decimal
+
+
+class ImportSettingsUpdate(BaseModel):
+    # refuse a Tally import when more than this % of the voucher line value is on ledgers
+    # missing from the Master file
+    max_unmatched_ledger_pct: Decimal = Field(ge=0, le=100)
 
 
 class SettingsUpdate(BaseModel):

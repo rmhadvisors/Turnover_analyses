@@ -29,6 +29,11 @@ class ThresholdSetting(Base):
     tds_analysis_fy: Mapped[str] = mapped_column(String(7), default="2025-26")
     # payments with no party ledger above this total are alerted; below it only listed
     tds_unidentified_min: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal(30000))
+    # a Tally import is refused when more of its voucher line value (in %) is on ledgers
+    # missing from the Master file (the Master is older than the Transactions file)
+    max_unmatched_ledger_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("2.00")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

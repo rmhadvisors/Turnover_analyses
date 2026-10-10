@@ -4,7 +4,10 @@ A limit's `applies_when` rule is a list of alternatives (any may match); each
 alternative maps a profile field to its allowed values (all must match), e.g.
 `[{"gst_registered": [False], "supplies": ["goods", "both"]}]`. A field the profile
 leaves unknown (None) never excludes a limit, so an incomplete profile keeps today's
-behaviour: the limit is checked. An empty rule applies to every client.
+behaviour: the limit is checked. The reserved key "known" lists fields that must be
+set for the alternative to match, for limits that only concern a narrow group (an LLP,
+a professional): those stay off until the profile says the client is in that group.
+An empty rule applies to every client.
 
 Pure functions only - no database access.
 """
@@ -64,6 +67,12 @@ class GstinFacts:
     hint: str | None
 
 
+def pan_entity(pan: str | None) -> str | None:
+    """Suggested entity type from the 4th character of a PAN (None if unknown / ambiguous)."""
+    value = (pan or "").strip().upper()
+    return PAN_ENTITY.get(value[3]) if len(value) == 10 else None
+
+
 def parse_gstin(gstin: str | None) -> GstinFacts | None:
     """State, special-category flag and suggested entity type from a 15-character GSTIN."""
     value = (gstin or "").strip().upper()
@@ -98,13 +107,23 @@ def context(profile: Any | None, previous_turnover: Decimal | None) -> dict[str,
     return facts
 
 
+KNOWN = "known"  # reserved rule key: fields that must be set in the profile
+
+
+def _matches(option: dict[str, list[Any]], facts: dict[str, Any]) -> bool:
+    if any(facts.get(name) is None for name in option.get(KNOWN, ())):
+        return False
+    return all(
+        facts.get(name) is None or facts[name] in allowed
+        for name, allowed in option.items()
+        if name != KNOWN
+    )
+
+
 def applies(rule: Rule | None, facts: dict[str, Any]) -> bool:
     if not rule:
         return True
-    return any(
-        all(facts.get(name) is None or facts[name] in allowed for name, allowed in option.items())
-        for option in rule
-    )
+    return any(_matches(option, facts) for option in rule)
 
 
 _LABELS = {
@@ -124,7 +143,9 @@ def describe(rule: Rule | None) -> str:
     for option in rule:
         parts = []
         for name, allowed in option.items():
-            if name in _LABELS:
+            if name == KNOWN:
+                parts.append(f"{' and '.join(n.replace('_', ' ') for n in allowed)} set in the profile")
+            elif name in _LABELS:
                 parts.append(" / ".join(_LABELS[name].get(v, str(v)) for v in allowed))
             else:
                 parts.append(f"{name.replace('_', ' ')}: {'/'.join(str(v) for v in allowed)}")
@@ -133,10 +154,17 @@ def describe(rule: Rule | None) -> str:
 
 
 _NOT_SPECIAL = {"special_category": [False]}
-_TDS_DEDUCTOR: Rule = [
-    {"entity_type": ["firm", "llp", "company", "other"]},
-    {"entity_type": ["individual", "huf"], "prev_year_audit": [True]},
-]
+
+
+def _professional(cash_within_5pct: bool) -> Rule:
+    """44ADA: only for a client marked as a professional, or as opting for 44ADA."""
+    base = {"presumptive": ["44ADA"], "cash_within_5pct": [cash_within_5pct]}
+    return [
+        {"nature": ["profession", "both"], **base, KNOWN: ["nature"]},
+        {**base, KNOWN: ["presumptive"]},
+    ]
+
+
 # Default rules, by the default limit names in seed_data.py.
 DEFAULT_RULES: dict[str, Rule] = {
     "GST registration - goods (regular states)": [
@@ -163,19 +191,18 @@ DEFAULT_RULES: dict[str, Rule] = {
     "Presumptive taxation u/s 44AD - business (cash within 5%)": [
         {"presumptive": ["44AD"], "cash_within_5pct": [True], "entity_type": ["individual", "huf", "firm"]}
     ],
+    "Presumptive taxation u/s 44ADA - professionals (standard)": _professional(False),
+    "Presumptive taxation u/s 44ADA - professionals (cash within 5%)": _professional(True),
+    "E-invoicing applicability": [{"gst_registered": [True]}],
+    "LLP audit": [{"entity_type": ["llp"], KNOWN: ["entity_type"]}],
+}  # fmt: skip
+# Rules these limits were seeded with before; a limit still on one of them is upgraded.
+OLD_DEFAULT_RULES: dict[str, Rule] = {
     "Presumptive taxation u/s 44ADA - professionals (standard)": [
         {"presumptive": ["44ADA"], "cash_within_5pct": [False]}
     ],
     "Presumptive taxation u/s 44ADA - professionals (cash within 5%)": [
         {"presumptive": ["44ADA"], "cash_within_5pct": [True]}
     ],
-    "E-invoicing applicability": [{"gst_registered": [True]}],
-    "TDS u/s 194Q - purchases of goods": [{"prev_turnover_over_10cr": [True]}],
-    "TDS u/s 194Q - buyer turnover": [{"nature": ["business", "both"]}],
     "LLP audit": [{"entity_type": ["llp"]}],
-    "TDS u/s 194J - professional / technical fees": _TDS_DEDUCTOR,
-    "TDS u/s 194C - contractors": _TDS_DEDUCTOR,
-    "TDS u/s 194H - commission / brokerage": _TDS_DEDUCTOR,
-    "TDS u/s 194I(a) - rent of plant & machinery": _TDS_DEDUCTOR,
-    "TDS u/s 194I(b) - rent of land / building": _TDS_DEDUCTOR,
-}  # fmt: skip
+}

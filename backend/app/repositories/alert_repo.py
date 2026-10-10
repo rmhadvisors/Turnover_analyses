@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Alert
+from app.models import AbsoluteLimit, Alert
 from app.services.alert_engine import (
     ACTIONABLE,
     AlertEvent,
@@ -151,3 +151,25 @@ def acknowledge(db: Session, alert: Alert, by: str, note: str | None = None) -> 
     db.commit()
     db.refresh(alert)
     return alert
+
+
+def close_limit_alerts(db: Session, limit_ids: set[int], by: str) -> int:
+    """Acknowledge the open alerts of these statutory limits (they stay in the history)."""
+    closed = 0
+    for alert in db.scalars(
+        select(Alert).where(Alert.acknowledged.is_(False), Alert.metric.like("limit:%"))
+    ):
+        if int(alert.metric.split(":")[1]) in limit_ids:
+            alert.acknowledged, alert.acknowledged_by = True, by
+            closed += 1
+    return closed
+
+
+def without_deleted_limits(db: Session, alerts: list[Alert]) -> list[Alert]:
+    """The alerts minus those of statutory limits that no longer exist."""
+    existing = set(db.scalars(select(AbsoluteLimit.id)))
+    return [
+        a
+        for a in alerts
+        if not a.metric.startswith("limit:") or int(a.metric.split(":")[1]) in existing
+    ]

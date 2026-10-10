@@ -2,7 +2,7 @@
 
 Commonly used Indian compliance figures, pre-filled as EDITABLE STARTING POINTS
 ONLY - every description says 'verify current limit'. They are not authoritative
-law; the CA edits or disables them in Settings.
+law; the CA edits or disables them in Settings. Only turnover limits belong here.
 """
 
 from decimal import Decimal
@@ -10,12 +10,6 @@ from decimal import Decimal
 from app.models import AbsoluteLimitMetric as M
 
 _V = "Verify current limit before relying on it. "
-PURCHASE_194Q_TEXT = (
-    "TDS at 0.1% on purchases above Rs 50 lakh from any one seller in the year. Checked "
-    "per seller (cash purchases excluded), only for buyers whose previous-year turnover "
-    "exceeded Rs 10 crore."
-)
-
 DEFAULT_LIMITS: list[dict] = [
     {
         "name": "GST registration - goods (regular states)",
@@ -91,58 +85,21 @@ DEFAULT_LIMITS: list[dict] = [
         "financial year exceeds this amount (currently Rs 5 crore).",
     },
     {
-        "name": "TDS u/s 194Q - purchases of goods",
-        "metric": M.PURCHASE_PER_SELLER,
-        "amount": Decimal(5000000),
-        "description": _V + PURCHASE_194Q_TEXT,
-    },
-    {
-        "name": "TDS u/s 194Q - buyer turnover",
+        "name": "LLP audit",
         "metric": M.SALES_TURNOVER,
-        "amount": Decimal(100000000),
-        "description": _V + "Section 194Q applies to buyers whose turnover in the preceding "
-        "year exceeded Rs 10 crore.",
+        "amount": Decimal(5000000),
+        "description": _V + "Review trigger at Rs 50 lakh turnover. LLP accounts must be audited "
+        "when turnover exceeds Rs 40 lakh or partners' contribution exceeds Rs 25 lakh.",
     },
-    # Rs 50 lakh review triggers (set by the firm): once turnover passes Rs 50 lakh, check
-    # these obligations. The per-payee thresholds in each description are not checked here.
-    *(
-        {
-            "name": name,
-            "metric": M.SALES_TURNOVER,
-            "amount": Decimal(5000000),
-            "description": _V + text,
-        }
-        for name, text in (
-            (
-                "LLP audit",
-                "Review trigger at Rs 50 lakh turnover. LLP accounts must be audited when "
-                "turnover exceeds Rs 40 lakh or partners' contribution exceeds Rs 25 lakh.",
-            ),
-            (
-                "TDS u/s 194J - professional / technical fees",
-                "Review trigger at Rs 50 lakh turnover. TDS on fees for professional or "
-                "technical services above Rs 50,000 per payee in the year (Rs 30,000 before FY 2025-26).",
-            ),
-            (
-                "TDS u/s 194C - contractors",
-                "Review trigger at Rs 50 lakh turnover. TDS on payments to contractors above "
-                "Rs 30,000 in one payment or Rs 1,00,000 in the year per contractor.",
-            ),
-            (
-                "TDS u/s 194H - commission / brokerage",
-                "Review trigger at Rs 50 lakh turnover. TDS on commission or brokerage above "
-                "Rs 20,000 per payee in the year (Rs 15,000 before FY 2025-26).",
-            ),
-            (
-                "TDS u/s 194I(a) - rent of plant & machinery",
-                "Review trigger at Rs 50 lakh turnover. TDS at 2% on rent for plant, machinery "
-                "or equipment above Rs 50,000 per month per payee (Rs 2,40,000 a year before FY 2025-26).",
-            ),
-            (
-                "TDS u/s 194I(b) - rent of land / building",
-                "Review trigger at Rs 50 lakh turnover. TDS at 10% on rent for land, building "
-                "or furniture above Rs 50,000 per month per payee (Rs 2,40,000 a year before FY 2025-26).",
-            ),
-        )
-    ),
 ]
+# TDS section thresholds (194C / 194H / 194I / 194J / 194Q) are per-party limits handled by
+# the TDS module; these rows were seeded as turnover limits before and are removed on upgrade.
+REMOVED_TDS_LIMITS = (
+    "TDS u/s 194Q - purchases of goods",
+    "TDS u/s 194Q - buyer turnover",
+    "TDS u/s 194J - professional / technical fees",
+    "TDS u/s 194C - contractors",
+    "TDS u/s 194H - commission / brokerage",
+    "TDS u/s 194I(a) - rent of plant & machinery",
+    "TDS u/s 194I(b) - rent of land / building",
+)

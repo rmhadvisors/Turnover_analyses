@@ -133,17 +133,28 @@ def _fy_set(text: str) -> set[str]:
 # does not block the progress endpoint below.
 @router.post("/tally-json/preview", response_model=JsonPreview)
 def preview_tally_json(
-    client_id: int = Form(...),
+    client_id: int | None = Form(None),
     files: list[UploadFile] = File(...),
     progress_token: str | None = Form(None),
+    expected_gstin: str | None = Form(None),
+    expected_pan: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Dry run for Tally's JSON export: send the Master and Transactions files together.
-    Poll /imports/tally-json/progress/{progress_token} meanwhile for a progress bar."""
-    if client_repo.get_client(db, client_id) is None:
+    Poll /imports/tally-json/progress/{progress_token} meanwhile for a progress bar.
+    Without `client_id` (a client not created yet) the files are checked against
+    `expected_gstin` / `expected_pan` instead of a client's profile."""
+    if client_id is not None and client_repo.get_client(db, client_id) is None:
         raise HTTPException(404, "Client not found")
     try:
-        return import_json_service.preview_json(db, client_id, _uploads(files), progress_token)
+        return import_json_service.preview_json(
+            db,
+            client_id,
+            _uploads(files),
+            progress_token,
+            (expected_gstin or "").strip().upper() or None,
+            (expected_pan or "").strip().upper() or None,
+        )
     except ImportFormatError as exc:
         raise HTTPException(422, str(exc)) from exc
 

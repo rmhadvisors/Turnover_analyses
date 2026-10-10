@@ -128,3 +128,60 @@ def test_real_advance_power_full_import_via_the_service_layer(db_session) -> Non
         target = TARGETS[("ADVANCE POWER", key)]
         assert figures.turnover == Decimal(target["sales"])
         assert figures.purchases == Decimal(target["purchases"])
+
+
+# ---------------------------------------------- files that do not belong together
+
+COMPANY_IDS = {  # each client's Tally company GUID, as carried by every guid in its exports
+    "ADVANCE POWER": "2a1d1dde-741a-4be9-b634-65b0569c42ff",
+    "JIGEESHA AUTO SERVICES": "bd267260-5ac4-4f1f-8a69-cf1d2efb1c19",
+    "SHIRKE FLEX INDUSTRIAL": "710a0dec-9964-4ff4-ab30-04cf77247928",
+    "HOTEL KINARA": "116eb1a3-865d-421c-bf93-b064d19035d7",
+}
+
+
+def test_real_jigeesha_master_with_hotel_kinara_transactions_is_refused(db_session) -> None:
+    from app.models import Client, ClientProfile
+    from app.services.tally_importer import ImportFormatError
+
+    for name, gstin in (("JIGEESHA AUTO SERVICES", "27ABFPL5804R1Z4"), ("HOTEL KINARA", "27AAKFH4657G1Z4")):
+        client = Client(name=name, tally_company_id=COMPANY_IDS[name])
+        db_session.add(client)
+        db_session.flush()
+        db_session.add(ClientProfile(client_id=client.id, gstin=gstin))
+    db_session.commit()
+    master_path, _ = FILES[("JIGEESHA AUTO SERVICES", "24-25")]
+    _, tx_path = FILES[("HOTEL KINARA", "24-25")]
+    pair = [(master_path.name, master_path.read_bytes()), (tx_path.name, tx_path.read_bytes())]
+
+    preview = js.preview_json(db_session, None, pair)
+    assert preview["can_import"] is False
+    (blocker,) = [b for b in preview["blockers"] if "different Tally companies" in b]
+    assert "Master file: JIGEESHA AUTO SERVICES" in blocker
+    assert "Transactions file: HOTEL KINARA (GSTIN 27AAKFH4657G1Z4" in blocker
+    assert preview["unmatched_ledger_count"] > 100  # listed for the reviewer as well
+    with pytest.raises(ImportFormatError, match="different Tally companies"):
+        kinara = db_session.query(Client).filter_by(name="HOTEL KINARA").one()
+        js.import_json(db_session, kinara.id, pair)
+
+
+# share (%) of each genuine pair's voucher line value on ledgers missing from its Master
+UNMATCHED_SHARE = {
+    ("ADVANCE POWER", "24-25"): "0.00",
+    ("ADVANCE POWER", "25-26"): "0.00",
+    ("JIGEESHA AUTO SERVICES", "24-25"): "21.55",  # HPCL + PetroCard are not in that Master
+    ("JIGEESHA AUTO SERVICES", "25-26"): "0.00",
+    ("SHIRKE FLEX INDUSTRIAL", "24-25"): "0.00",
+    ("SHIRKE FLEX INDUSTRIAL", "25-26"): "0.00",
+    ("HOTEL KINARA", "24-25"): "0.10",
+    ("HOTEL KINARA", "25-26"): "0.00",
+}
+
+
+@pytest.mark.parametrize(("company", "fy"), sorted(UNMATCHED_SHARE))
+def test_real_pairs_share_one_company_and_their_unmatched_share(company, fy) -> None:
+    master_path, tx_path = FILES[(company, fy)]
+    master = tj.build_master([tj.read_records(master_path.read_bytes(), master_path.name)])
+    result = tj.parse_transactions([tj.read_records(tx_path.read_bytes(), tx_path.name)], master)
+    assert set(master.company_ids) == set(result.company_ids) == {COMPANY_IDS[company]}
+    assert result.unknown_share_pct() == Decimal(UNMATCHED_SHARE[(company, fy)])

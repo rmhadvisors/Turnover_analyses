@@ -3,8 +3,15 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AbsoluteLimit
-from app.repositories import threshold_repo
-from app.schemas.thresholds import LimitBase, LimitRead, SettingsRead, SettingsUpdate
+from app.migrations import SYSTEM_LIMIT_DELETED
+from app.repositories import alert_repo, threshold_repo
+from app.schemas.thresholds import (
+    ImportSettingsUpdate,
+    LimitBase,
+    LimitRead,
+    SettingsRead,
+    SettingsUpdate,
+)
 from app.services.recheck_service import evaluate_all_clients
 
 router = APIRouter(prefix="/thresholds", tags=["thresholds"])
@@ -30,6 +37,16 @@ def update_settings(body: SettingsUpdate, db: Session = Depends(get_db)):
     settings.include_gst_in_turnover = body.include_gst_in_turnover
     db.commit()
     evaluate_all_clients(db)
+    db.refresh(settings)
+    return settings
+
+
+@router.put("/import-settings", response_model=SettingsRead)
+def update_import_settings(body: ImportSettingsUpdate, db: Session = Depends(get_db)):
+    """Checks applied to Tally imports (no figures change, so nothing is re-checked)."""
+    settings = threshold_repo.get_settings(db)
+    settings.max_unmatched_ledger_pct = body.max_unmatched_ledger_pct
+    db.commit()
     db.refresh(settings)
     return settings
 
@@ -66,5 +83,6 @@ def update_limit(limit_id: int, body: LimitBase, db: Session = Depends(get_db)):
 @router.delete("/limits/{limit_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_limit(limit_id: int, db: Session = Depends(get_db)):
     db.delete(_limit_or_404(db, limit_id))
+    alert_repo.close_limit_alerts(db, {limit_id}, SYSTEM_LIMIT_DELETED)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

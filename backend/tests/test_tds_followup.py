@@ -129,6 +129,9 @@ TRANSACTIONS = [
     v("Journal", "X1", "20250605", [e("Contract Labour", -10000), e("XYZ ADVISORS PVT LTD", 10000, True)]),
     *RENT,
 ]  # fmt: skip
+INDIVIDUAL_GSTIN = "27BBIPS6830E1ZG"  # PAN type P: an individual
+# the vouchers carry the company's own GSTIN, which must match the client's profile
+TRANSACTIONS = [{**voucher, "cmpgstin": INDIVIDUAL_GSTIN} for voucher in TRANSACTIONS]
 FILES = [("Master.json", export(MASTER)), ("Transactions.json", export(TRANSACTIONS))]
 FY = "2025-26"
 

@@ -50,11 +50,19 @@ EXCLUDED_FLAGS = (
 _TWO_PLACES = Decimal("0.01")
 _STOCK_KEY = "stock-in-hand"  # Tally's reserved group, matched case-insensitively
 _TAX_NAME = re.compile(r"\b(cgst|sgst|utgst|igst|gst|cess)\b", re.IGNORECASE)
+# Every Tally object guid starts with its company's GUID: '<company guid>-<object number>'.
+_COMPANY_GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
 def _clean(name: Any) -> str:
     """Ledger / group names can carry stray whitespace or line breaks in the export."""
     return " ".join(str(name).split())
+
+
+def company_id(guid: Any) -> str | None:
+    """The Tally company GUID a record belongs to (the first 36 characters of its guid)."""
+    match = _COMPANY_GUID.match(str(guid or ""))
+    return match.group(0).lower() if match else None
 
 
 def _key(name: Any) -> str:
@@ -235,6 +243,7 @@ class Master:
     # Ledger balances in the Master: opening balance, and dated closing values (closing stock).
     opening: dict[str, Decimal] = field(default_factory=dict)  # _key(ledger) -> amount
     closing: dict[str, dict[date, Decimal]] = field(default_factory=dict)
+    company_ids: Counter = field(default_factory=Counter)  # Tally company GUID -> records
     _cache: dict[str, frozenset[str]] = field(default_factory=dict, repr=False)
 
     def ancestors(self, ledger: str) -> frozenset[str]:
@@ -282,6 +291,9 @@ def build_master(record_files: Iterable[RecordsFile | RecordsStream]) -> Master:
     master = Master()
     for file in record_files:
         for record in file.records:
+            company = company_id(record.get("guid"))
+            if company:
+                master.company_ids[company] += 1
             record_type = record.get("metadata", {}).get("type")
             name = _record_name(record)
             parent = _clean(record["parent"]) if record.get("parent") else ""
@@ -421,6 +433,19 @@ class JsonParseResult:
     excluded_cutoff_dates: set[date] = field(default_factory=set)
     duplicate_guid_vouchers: int = 0  # same voucher present in more than one Transactions file
     profit_parts: dict[str, ProfitParts] = field(default_factory=dict)  # FY -> P&L totals
+    company_ids: Counter = field(default_factory=Counter)  # Tally company GUID -> vouchers
+    line_value: Decimal = Decimal(0)  # sum of |amount| over every ledger line of posted vouchers
+    months: set[tuple[int, int]] = field(default_factory=set)  # (year, month) of posted vouchers
+
+    @property
+    def unknown_value(self) -> Decimal:
+        return sum(self.unknown_ledger_amounts.values(), Decimal(0))
+
+    def unknown_share_pct(self) -> Decimal:
+        """Share of the vouchers' line value (in %) on ledgers missing from the Master."""
+        if not self.line_value:
+            return Decimal(0)
+        return (self.unknown_value * 100 / self.line_value).quantize(_TWO_PLACES)
 
 
 def _quantize(value: Decimal) -> Decimal:
@@ -482,6 +507,7 @@ class _Outcome:
     trading: Decimal = Decimal(0)  # net of ledgers in gross-profit groups (credit +)
     pl: Decimal = Decimal(0)  # net of other revenue ledgers (indirect incomes / expenses)
     unknown_net: Decimal = Decimal(0)  # net of ledgers missing from the Master
+    line_value: Decimal = Decimal(0)  # sum of |amount| over the voucher's ledger lines
     ledger_voucher: LedgerVoucher | None = None
 
 
@@ -544,6 +570,7 @@ def _evaluate(voucher: dict, when: date, position: int, master: Master) -> _Outc
         trading=trading,
         pl=pl,
         unknown_net=unknown_net,
+        line_value=sum((abs(e.amount) for e in entries), Decimal(0)),
         ledger_voucher=ledger_voucher,
     )
 
@@ -559,6 +586,8 @@ def _apply(result: JsonParseResult, outcome: _Outcome) -> None:
         result.ledger_vouchers.append(outcome.ledger_voucher)
     if outcome.gstin:
         result.gstins[outcome.gstin] += 1
+    result.line_value += outcome.line_value
+    result.months.add((when.year, when.month))
     result.first_date = min(result.first_date or when, when)
     result.last_date = max(result.last_date or when, when)
     result.unreadable_amounts += outcome.unreadable
@@ -600,6 +629,9 @@ def parse_transactions(
             if voucher.get("metadata", {}).get("type") != "Voucher":
                 continue
             guid = voucher.get("guid")
+            company = company_id(guid)
+            if company:
+                result.company_ids[company] += 1
             if guid:
                 if guid in seen_guids:
                     result.duplicate_guid_vouchers += 1

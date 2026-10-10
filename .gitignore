@@ -9,9 +9,6 @@ env/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
-.streamlit/
-!frontend/.streamlit/
-!frontend/.streamlit/config.toml
 
 # real client exports (confidential) - never commit
 sample_data/real/

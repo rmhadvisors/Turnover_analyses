@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -102,7 +102,40 @@ class JsonSummary(BaseModel):
     warnings: list[str]
 
 
+class UnmatchedLedger(BaseModel):
+    name: str
+    lines: int
+    amount: Decimal  # total of |amount| on its voucher lines
+
+
+class MonthCoverage(BaseModel):
+    fy: str
+    covered: list[str]  # e.g. "Apr-2025": months with posted vouchers
+    missing: list[str]  # months of the FY (up to today) with no voucher at all
+
+
+class FileCompany(BaseModel):
+    tally_company_id: str | None  # GUID of the Transactions file's Tally company
+    master_company_id: str | None
+    gstin: str | None
+    client_name: str | None  # the client already linked to this company, if any
+
+
 class JsonPreview(JsonSummary):
+    blockers: list[str] = []  # reasons these files must not be imported (import is refused)
+    can_import: bool = True
+    company: FileCompany | None = None
+    detected_fy: str | None = None  # the FY with the most vouchers
+    fy_vouchers: dict[str, int] = {}  # FY -> posted vouchers of any type
+    first_date: date | None = None
+    last_date: date | None = None
+    months: list[MonthCoverage] = []
+    unmatched_ledgers: list[UnmatchedLedger] = []  # largest first (at most 50)
+    unmatched_ledger_count: int = 0
+    unmatched_lines: int = 0
+    unmatched_amount: Decimal = Decimal(0)
+    unmatched_share_pct: Decimal = Decimal(0)  # of the vouchers' line value
+    unmatched_limit_pct: Decimal | None = None  # imports are refused above this share
     would_import: int
     duplicates: int
     sample: list[dict[str, Any]]

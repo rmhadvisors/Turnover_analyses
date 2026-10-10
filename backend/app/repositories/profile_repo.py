@@ -9,6 +9,7 @@ from app.services.applicability import parse_gstin
 
 PROFILE_FIELDS = (
     "gstin",
+    "pan",
     "state_code",
     "gst_registered",
     "special_category",
@@ -43,6 +44,7 @@ def fill_from_gstin(db: Session, client_id: int, gstin: str) -> bool:
     db.add(profile)
     derived = {
         "gstin": facts.gstin,
+        "pan": facts.gstin[2:12],
         "state_code": facts.state_code,
         "gst_registered": True,
         "special_category": facts.special_category,

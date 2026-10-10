@@ -23,6 +23,8 @@ class Client(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # The Tally company GUID its JSON exports carry (set by the first Tally import).
+    tally_company_id: Mapped[str | None] = mapped_column(String(36))
 
     yearly_figures: Mapped[list[YearlyFigures]] = relationship(
         back_populates="client", cascade="all, delete-orphan"

@@ -12,16 +12,27 @@ import io
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import IO
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.repositories import figures_repo, import_repo, profile_repo, voucher_repo
+from app.models import Client, ClientProfile
+from app.repositories import (
+    client_repo,
+    figures_repo,
+    import_repo,
+    profile_repo,
+    threshold_repo,
+    voucher_repo,
+)
 from app.services import tally_json as tj
 from app.services import tds_capture, tds_service
+from app.services.fy_utils import fy_bounds, fy_label
 from app.services.import_service import dedupe, period_text, refresh_figures_from_vouchers
 from app.services.recheck_service import evaluate_client, fys_with_data
 from app.services.tally_importer import (
@@ -45,6 +56,7 @@ class Analysis:
     digest: str
     profits: list[tj.ProfitFigures]
     ledger_book: tds_capture.LedgerBook
+    master_company_ids: Counter  # Tally company GUID -> records in the Master file(s)
 
 
 def _stream_hash(raw: IO[bytes]) -> str:
@@ -124,17 +136,180 @@ def analyze(files: list[Upload], progress: Progress | None = None) -> Analysis:
     digest = file_hash("|".join(sorted(_stream_hash(raw) for _, raw in raws)).encode())
     warnings = tj.describe_warnings(result, master, kinds)
     profits = tj.derive_profits(result, master)
-    return Analysis(described, result, warnings, digest, profits, ledger_book)
+    return Analysis(
+        described, result, warnings, digest, profits, ledger_book, master.company_ids
+    )
+
+
+# ------------------------------------------------------- do the files belong together?
+
+UNMATCHED_LIST_LIMIT = 50
+
+
+def _main(counter: Counter) -> str | None:
+    return counter.most_common(1)[0][0] if counter else None
+
+
+def _client_for_company(db: Session, company: str | None, gstin: str | None) -> Client | None:
+    """The client whose Tally exports carry this company GUID (else this GSTIN)."""
+    if company:
+        client = db.scalar(select(Client).where(Client.tally_company_id == company))
+        if client is not None:
+            return client
+    if gstin:
+        profile = db.scalar(select(ClientProfile).where(ClientProfile.gstin == gstin))
+        if profile is not None:
+            return client_repo.get_client(db, profile.client_id)
+    return None
+
+
+def _company_label(db: Session, company: str | None, gstin: str | None = None) -> str:
+    """e.g. 'HOTEL KINARA (GSTIN 27AAKFH4657G1Z4, Tally company 116eb1a3...)'."""
+    client = _client_for_company(db, company, gstin)
+    if gstin is None and client is not None and client.profile is not None:
+        gstin = client.profile.gstin
+    details = [f"GSTIN {gstin}"] if gstin else []
+    if company:
+        details.append(f"Tally company {company[:8]}…")
+    name = client.name if client else "a company not yet loaded here"
+    return f"{name} ({', '.join(details)})" if details else name
+
+
+def check_pairing(
+    db: Session,
+    client_id: int | None,
+    analysis: Analysis,
+    expected_gstin: str | None = None,
+    expected_pan: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """(blockers, warnings) on whether the files belong together and to this client.
+
+    Every Tally object guid starts with its company's GUID, so a Master and a Transactions
+    file from different companies are told apart reliably; the company GSTIN on the
+    vouchers is a second check against the client's GSTIN / PAN. Even from the same
+    company, a Master that lacks ledgers carrying more than the configured share of the
+    vouchers' value is older than the Transactions file and gives wrong figures."""
+    result = analysis.result
+    blockers: list[str] = []
+    warnings: list[str] = []
+    client = client_repo.get_client(db, client_id) if client_id is not None else None
+    profile = profile_repo.get_profile(db, client_id) if client_id is not None else None
+    tx_company, master_company = _main(result.company_ids), _main(analysis.master_company_ids)
+    tx_gstin = _main(result.gstins)
+
+    for counter, what in (
+        (result.company_ids, "Transactions"),
+        (analysis.master_company_ids, "Master"),
+    ):
+        if len(counter) > 1:
+            names = "; ".join(_company_label(db, c) for c in counter)
+            blockers.append(
+                f"The {what} files come from {len(counter)} different Tally companies "
+                f"({names}). Upload files from one company only."
+            )
+    if tx_company and master_company and tx_company != master_company:
+        blockers.append(
+            "The Master file and the Transactions file are from different Tally companies. "
+            f"Master file: {_company_label(db, master_company)}. "
+            f"Transactions file: {_company_label(db, tx_company, tx_gstin)}. "
+            "Export both files from the same company in Tally."
+        )
+
+    gstin = expected_gstin or (profile.gstin if profile else None)
+    pan = expected_pan or (profile.pan if profile else None) or (gstin[2:12] if gstin else None)
+    whose = client.name if client else "the client details entered"
+    if tx_gstin and gstin and tx_gstin.upper() != gstin.upper():
+        blockers.append(
+            f"The Transactions file is for GSTIN {tx_gstin} "
+            f"({_company_label(db, tx_company, tx_gstin)}), but {whose} has GSTIN {gstin}."
+        )
+    elif tx_gstin and pan and tx_gstin[2:12].upper() != pan.upper():
+        blockers.append(
+            f"The Transactions file is for GSTIN {tx_gstin} (PAN {tx_gstin[2:12]}), "
+            f"but {whose} has PAN {pan}."
+        )
+
+    owner = _client_for_company(db, tx_company, None) if tx_company else None
+    if owner is not None and client is not None and owner.id != client.id:
+        blockers.append(
+            f"These files are from the Tally company already imported for {owner.name}, "
+            f"not {client.name}. Add them to {owner.name} instead."
+        )
+    elif owner is not None and client is None:
+        warnings.append(
+            f"These files are from the Tally company already imported for {owner.name}. "
+            f"To add a year to it, use 'Add data' on {owner.name} instead of a new client."
+        )
+    elif (
+        client is not None
+        and client.tally_company_id
+        and tx_company
+        and tx_company != client.tally_company_id
+    ):
+        warnings.append(
+            f"These files are from a different Tally company ({tx_company[:8]}…) than the "
+            f"files imported for {client.name} before ({client.tally_company_id[:8]}…). "
+            "That is expected only if the company was split or re-created in Tally."
+        )
+
+    limit = threshold_repo.get_settings(db).max_unmatched_ledger_pct
+    share = result.unknown_share_pct()
+    if share > limit and not any("different Tally companies" in b for b in blockers):
+        blockers.append(
+            "This Master looks older than the Transactions file — re-export the Master for "
+            f"the same period. {share}% of the vouchers' value "
+            f"({sum(result.unknown_ledger_lines.values()):,} line(s), "
+            f"₹{result.unknown_value:,.2f}) is on {len(result.unknown_ledgers)} ledger(s) "
+            f"missing from the Master; imports are refused above {limit}% (Settings)."
+        )
+    return blockers, warnings
+
+
+def _unmatched(analysis: Analysis) -> list[dict]:
+    result = analysis.result
+    rows = sorted(
+        result.unknown_ledgers, key=lambda name: (-result.unknown_ledger_amounts[name], name)
+    )
+    return [
+        {
+            "name": name,
+            "lines": result.unknown_ledger_lines[name],
+            "amount": result.unknown_ledger_amounts[name].quantize(Decimal("0.01")),
+        }
+        for name in rows[:UNMATCHED_LIST_LIMIT]
+    ]
+
+
+def _month_coverage(analysis: Analysis, today: date | None = None) -> list[dict]:
+    """Per FY in the files: months with posted vouchers and months with none (up to today)."""
+    today = today or date.today()
+    months = analysis.result.months
+    out = []
+    for fy in sorted({fy_label(date(y, m, 1)) for y, m in months}):
+        start, end = fy_bounds(fy)
+        covered, missing = [], []
+        year, month = start.year, start.month
+        while date(year, month, 1) <= min(end, today):
+            label = f"{date(year, month, 1):%b-%Y}"
+            (covered if (year, month) in months else missing).append(label)
+            year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+        out.append({"fy": fy, "covered": covered, "missing": missing})
+    return out
+
+
+def _fy_vouchers(analysis: Analysis) -> dict[str, int]:
+    """Posted vouchers (any type) per FY, for the detected year."""
+    return dict(Counter(fy_label(v.when) for v in analysis.result.ledger_vouchers))
 
 
 # Parsed previews waiting to be confirmed: token -> (client_id, created, Analysis).
 _PREVIEW_TTL_SECONDS = 3600
 _PREVIEW_LIMIT = 8
-_previews: OrderedDict[str, tuple[int, float, Analysis]] = OrderedDict()
+_previews: OrderedDict[str, tuple[int | None, float, Analysis]] = OrderedDict()
 _lock = threading.Lock()
 
 
-def _remember(client_id: int, analysis: Analysis) -> str:
+def _remember(client_id: int | None, analysis: Analysis) -> str:
     token = uuid.uuid4().hex
     with _lock:
         now = time.monotonic()
@@ -151,7 +326,8 @@ def _remember(client_id: int, analysis: Analysis) -> str:
 def _recall(client_id: int, token: str) -> Analysis:
     with _lock:
         item = _previews.pop(token, None)
-    if item is None or item[0] != client_id:
+    # a preview made before the client existed (Add client) can be used by any client
+    if item is None or item[0] not in (None, client_id):
         raise ImportFormatError(
             "This preview has expired. Select the files again to re-check them."
         )
@@ -228,10 +404,16 @@ def _profit_rows(db: Session, client_id: int, analysis: Analysis, stored: set[st
 
 
 def preview_json(
-    db: Session, client_id: int, files: list[Upload], progress_token: str | None = None
+    db: Session,
+    client_id: int | None,
+    files: list[Upload],
+    progress_token: str | None = None,
+    expected_gstin: str | None = None,
+    expected_pan: str | None = None,
 ) -> dict:
-    """Dry run: what was found and how much of it is new for this client. The result
-    carries a `preview_token` that `import_json` accepts instead of the files."""
+    """Dry run: what was found and how much of it is new for this client (None: a client
+    not created yet). The result carries a `preview_token` that `import_json` accepts
+    instead of the files, and `blockers`: reasons the files must not be imported."""
     progress = Progress()
     if progress_token:
         _progress[progress_token] = progress
@@ -242,9 +424,39 @@ def preview_json(
             _progress.pop(progress_token, None)
     fresh, duplicates = dedupe(db, client_id, analysis.result.vouchers)
     fys = sorted({v.fy for v in analysis.result.vouchers})
-    stored = voucher_repo.count_imported_by_fy(db, client_id)
+    stored = voucher_repo.count_imported_by_fy(db, client_id) if client_id is not None else {}
+    blockers, pairing_warnings = check_pairing(
+        db, client_id, analysis, expected_gstin, expected_pan
+    )
+    fy_vouchers = _fy_vouchers(analysis)
+    result = analysis.result
+    tx_company, tx_gstin = _main(result.company_ids), _main(result.gstins)
+    owner = _client_for_company(db, tx_company, tx_gstin)
+    base = _base(analysis)
+    base["warnings"] = pairing_warnings + base["warnings"]
     return {
-        **_base(analysis),
+        **base,
+        "blockers": blockers,
+        "can_import": not blockers,
+        "company": {
+            "tally_company_id": tx_company,
+            "master_company_id": _main(analysis.master_company_ids),
+            "gstin": tx_gstin,
+            "client_name": owner.name if owner else None,
+        },
+        "detected_fy": (
+            max(fy_vouchers, key=lambda fy: (fy_vouchers[fy], fy)) if fy_vouchers else None
+        ),
+        "fy_vouchers": fy_vouchers,
+        "first_date": result.first_date,
+        "last_date": result.last_date,
+        "months": _month_coverage(analysis),
+        "unmatched_ledgers": _unmatched(analysis),
+        "unmatched_ledger_count": len(result.unknown_ledgers),
+        "unmatched_lines": sum(result.unknown_ledger_lines.values()),
+        "unmatched_amount": result.unknown_value.quantize(Decimal("0.01")),
+        "unmatched_share_pct": result.unknown_share_pct(),
+        "unmatched_limit_pct": threshold_repo.get_settings(db).max_unmatched_ledger_pct,
         "would_import": len(fresh),
         "duplicates": duplicates,
         "sample": _sample(fresh),
@@ -280,6 +492,9 @@ def import_json(
     if set(replace_fys) & set(skip_fys):
         raise ImportFormatError("A financial year cannot be both replaced and skipped.")
     analysis = _recall(client_id, preview_token) if preview_token else analyze(files or [])
+    blockers, _ = check_pairing(db, client_id, analysis)
+    if blockers:
+        raise ImportFormatError(" ".join(blockers))
     parsed = [v for v in analysis.result.vouchers if v.fy not in skip_fys]
     in_files = {v.fy for v in parsed}
     replaced: dict[str, int] = {}
@@ -333,6 +548,10 @@ def import_json(
         (gstin,) = analysis.result.gstins
         if profile_repo.fill_from_gstin(db, client_id, gstin):
             affected |= fys_with_data(db, client_id)  # applicable limits may have changed
+    client = client_repo.get_client(db, client_id)
+    tx_company = _main(analysis.result.company_ids)
+    if client is not None and client.tally_company_id is None and tx_company:
+        client.tally_company_id = tx_company
     raised = evaluate_client(db, client_id, affected)
     # ledger-level data for the TDS analysis (separate from the turnover vouchers)
     captured = tds_capture.store(

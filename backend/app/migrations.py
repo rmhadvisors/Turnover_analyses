@@ -6,21 +6,29 @@ adds columns introduced after a table was created, and fills them once.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.models import AbsoluteLimit, AbsoluteLimitMetric, Alert
-from app.repositories.seed_data import PURCHASE_194Q_TEXT
-from app.services.applicability import DEFAULT_RULES
+from app.models import AbsoluteLimit, Alert, Client
+from app.models.tds import TdsLedger
+from app.repositories.alert_repo import close_limit_alerts
+from app.repositories.seed_data import REMOVED_TDS_LIMITS
+from app.services.applicability import DEFAULT_RULES, OLD_DEFAULT_RULES
+from app.services.tally_json import company_id
 
 _NEW_COLUMNS = {
+    "clients": {"tally_company_id": "VARCHAR(36)"},
+    "client_profiles": {"pan": "VARCHAR(10)"},
     "yearly_figures": {"profit_source": "VARCHAR(20)"},
     "absolute_limits": {"applies_when": "JSON"},
     "threshold_settings": {
         "tds_approaching_pct": "NUMERIC(5, 2) DEFAULT 80",
         "tds_analysis_fy": "VARCHAR(7) DEFAULT '2025-26'",
         "tds_unidentified_min": "NUMERIC(18, 2) DEFAULT 30000",
+        "max_unmatched_ledger_pct": "NUMERIC(5, 2) DEFAULT 2",
     },
     "tds_ledger_map": {"requires_choice": "BOOLEAN DEFAULT 0"},
     "alerts": {
@@ -37,7 +45,8 @@ _NEW_COLUMNS = {
         "money_at_stake": "NUMERIC(18, 2)",
     },
 }
-SYSTEM_PER_SELLER = "System - 194Q is now checked per seller"
+SYSTEM_TDS_MOVED = "System - TDS thresholds are checked per party in the TDS module"
+SYSTEM_LIMIT_DELETED = "System - limit deleted"
 
 
 def _add_columns(engine: Engine) -> set[str]:
@@ -51,6 +60,47 @@ def _add_columns(engine: Engine) -> set[str]:
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
                     added.add(f"{table}.{name}")
     return added
+
+
+def _remove_tds_limits(db: Session) -> bool:
+    """TDS section thresholds are per-party limits, not turnover limits: delete the rows
+    seeded under those names and close their open alerts. True if anything changed."""
+    rows = db.query(AbsoluteLimit).filter(AbsoluteLimit.name.in_(REMOVED_TDS_LIMITS)).all()
+    close_limit_alerts(db, {row.id for row in rows}, SYSTEM_TDS_MOVED)
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    existing = {limit_id for (limit_id,) in db.query(AbsoluteLimit.id)}
+    orphans = {
+        int(metric.split(":")[1])
+        for (metric,) in db.query(Alert.metric).filter(
+            Alert.acknowledged.is_(False), Alert.metric.like("limit:%")
+        )
+    } - existing
+    close_limit_alerts(db, orphans, SYSTEM_LIMIT_DELETED)
+    return bool(rows or orphans)
+
+
+def _upgrade_rules(db: Session) -> bool:
+    """Limits still on a rule that was seeded before get the current default rule."""
+    changed = False
+    for limit in db.query(AbsoluteLimit).filter(AbsoluteLimit.name.in_(OLD_DEFAULT_RULES)):
+        if limit.applies_when == OLD_DEFAULT_RULES[limit.name]:
+            limit.applies_when = DEFAULT_RULES[limit.name]
+            changed = True
+    return changed
+
+
+def _backfill_company_ids(db: Session) -> None:
+    """The Tally company GUID of clients imported before it was stored, from their ledgers."""
+    for client in db.query(Client).filter(Client.tally_company_id.is_(None)):
+        ids = Counter(
+            company_id(guid)
+            for (guid,) in db.query(TdsLedger.guid).filter(TdsLedger.client_id == client.id)
+        )
+        ids.pop(None, None)
+        if len(ids) == 1:
+            client.tally_company_id = next(iter(ids))
 
 
 def upgrade(engine: Engine) -> None:
@@ -68,17 +118,13 @@ def upgrade(engine: Engine) -> None:
         if "absolute_limits.applies_when" in added:
             for limit in db.query(AbsoluteLimit):
                 limit.applies_when = DEFAULT_RULES.get(limit.name)
-                if (
-                    limit.name == "TDS u/s 194Q - purchases of goods"
-                    and limit.metric == AbsoluteLimitMetric.PURCHASE_TURNOVER
-                ):
-                    old_key = f"limit:{limit.id}:{AbsoluteLimitMetric.PURCHASE_TURNOVER.value}"
-                    limit.metric = AbsoluteLimitMetric.PURCHASE_PER_SELLER
-                    limit.description = (
-                        "Verify current limit before relying on it. " + PURCHASE_194Q_TEXT
-                    )
-                    for alert in db.query(Alert).filter(
-                        Alert.metric == old_key, Alert.acknowledged.is_(False)
-                    ):
-                        alert.acknowledged, alert.acknowledged_by = True, SYSTEM_PER_SELLER
+        if "clients.tally_company_id" in added:
+            _backfill_company_ids(db)
+        changed = _remove_tds_limits(db)
+        changed = _upgrade_rules(db) or changed
         db.commit()
+        if changed:
+            # closes the open alerts of limits that no longer apply to a client's profile
+            from app.services.recheck_service import evaluate_all_clients
+
+            evaluate_all_clients(db)

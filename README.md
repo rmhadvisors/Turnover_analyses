@@ -5,17 +5,17 @@ previous FY, checks them against configurable thresholds, and raises an alert th
 crosses one. Built for a CA practice that exports data from Tally (TallyPrime / Tally ERP 9).
 
 - `backend/` - FastAPI REST API, SQLAlchemy models, calculation and alert logic, Tally importer.
-- `frontend/` - Streamlit UI. Talks to the backend **only** through the REST API
-  (`frontend/api_client.py`); it never touches the database or the calculation logic.
+- `frontend/` - React UI (Vite + TypeScript). Talks to the backend **only** through the REST API
+  (`frontend/src/api.ts`); it never touches the database or the calculation logic.
 - `sample_data/` - dummy Tally-style exports for three fictional clients (try the whole flow).
 - `docs/TURNOVER_TOOLS.xlsx` - the original requirement sheet.
 
 ## Install and run
 
-You need Python 3.11+ for the backend. Run the backend and the frontend in two terminals; each has
-its own `requirements.txt` and virtual environment.
+You need Python 3.11+ for the backend and Node.js 20+ for the React UI. Run the backend and the
+web app in two terminals.
 
-**Backend** (http://localhost:8000, interactive API docs at `/docs`)
+**Backend** (http://localhost:8010, interactive API docs at `/docs`)
 
 ```bash
 cd backend
@@ -23,46 +23,26 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 copy .env.example .env            # optional; defaults work
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8010
 ```
 
 The SQLite database is created on first start and pre-filled with the default absolute limits.
 
-**Frontend** (http://localhost:8501)
-
-Use **Python 3.12** (pinned in `frontend/.python-version`), not 3.13/3.14 - pandas' compiled
-wheels for very new Python releases are the most likely to be blocked by Windows Application
-Control / Smart App Control (see Troubleshooting below), and are the least tested by pandas
-itself.
+**Frontend - React** (http://localhost:5173). Needs Node.js 20+.
 
 ```bash
 cd frontend
-py -3.12 -m venv .venv          # Windows; use `python3.12 -m venv .venv` on macOS/Linux
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env            # set BACKEND_URL if the API is not on 127.0.0.1:8000
-streamlit run app.py
+npm install
+copy .env.example .env            # set VITE_BACKEND_URL if the API is not on 127.0.0.1:8010
+npm run dev
 ```
 
-**Troubleshooting: `AttributeError: partially initialized module 'pandas' ...`**
-
-If the Clients or Dashboard page fails with a pandas import error that mentions a "circular
-import", the real cause is almost always that a pandas `.pyd` file failed to load - Windows raises
-this exact misleading message whenever pandas' C extension partially fails to initialise for any
-reason. Check, in order:
-
-1. **Windows Application Control / Smart App Control blocked the file.** Look in *Windows
-   Security -> App & browser control* (and *Protection history*) for a block naming one of
-   pandas' `_libs` `.pyd` files (e.g. `timedeltas`, `ops_dispatch`). Smart App Control has no
-   per-file allow-list, so the only fix is turning it off (device-wide) or - on a managed machine
-   - asking your IT admin to allow it through a WDAC policy.
-2. **Wrong Python version.** Confirm the venv is on Python 3.12 (`python --version` inside the
-   activated venv) - see above.
-3. **A local file shadowing pandas.** Make sure there is no `pandas.py`, `numpy.py` or `pandas/`
-   folder anywhere in `frontend/` outside `.venv`.
-
-If pandas still won't import after that, the page shows a friendly error instead of a raw
-traceback; the full traceback is still printed to the terminal running `streamlit run`.
+The backend only accepts browser calls from the origins in its `CORS_ORIGINS` setting
+(default `http://localhost:5173,http://127.0.0.1:5173`). When you deploy the React app, add its
+URL there. `npm run build` writes a static site to `frontend/dist/`, which any static host can serve
+(on Vercel, set the project's Root Directory to `frontend` and the `VITE_BACKEND_URL` environment
+variable). The backend itself needs a server with a persistent disk (or Postgres): Vercel
+serverless functions cannot keep the SQLite database.
 
 **Tests and lint** (backend)
 
@@ -279,7 +259,7 @@ turnover is unchanged), or capture only the TDS data with
 
 ## Status
 
-All five stages are complete: skeleton, data model + calculations, Tally import + API, Streamlit
+All five stages are complete: skeleton, data model + calculations, Tally import + API, React
 screens, reports and exports; the JSON importer has also been checked against real client data for
 four companies across two financial years each. Not built (by design): e-mail / WhatsApp delivery
 of alerts (the `notify()` hook in `backend/app/services/alert_engine.py` is where channels plug

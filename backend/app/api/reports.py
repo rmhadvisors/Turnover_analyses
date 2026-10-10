@@ -109,7 +109,12 @@ def client_report(
     return ClientReportRead(
         comparison=comparison_to_read(build_comparison(db, client, fy, as_of)),
         monthly=MonthlyRead.model_validate(build_monthly(db, client, fy), from_attributes=True),
-        alerts=[alert_to_read(a) for a in alert_repo.list_alerts(db, client.id, fy)],
+        # alerts of a deleted limit (e.g. the TDS sections once seeded as turnover limits)
+        # stay in the Alerts history but are not part of the client's report
+        alerts=[
+            alert_to_read(a)
+            for a in alert_repo.without_deleted_limits(db, alert_repo.list_alerts(db, client.id, fy))
+        ],
         tds=_tds_block(db, client.id, fy),
     )
 
