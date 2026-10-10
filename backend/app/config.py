@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     default_moderate_band_pct: float = 5.0
     default_significant_band_pct: float = 20.0
     # Browser origins allowed to call the API (the React frontend), comma-separated.
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://turnover-analyses.vercel.app"
     # Also allowed: any port on this machine, so the dev server works whichever port it picks.
     cors_origin_regex: str = r"http://(localhost|127\.0\.0\.1):\d+"
 
