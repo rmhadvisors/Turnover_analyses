@@ -11,7 +11,7 @@
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8010").replace(/\/+$/, "");
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? "http://200.234.40.130:8010").replace(/\/+$/, "");
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class ApiError extends Error {}
