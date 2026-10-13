@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.database import Base
 from app.models import Client
 
 
@@ -36,5 +37,11 @@ def rename_client(db: Session, client: Client, name: str) -> Client:
 
 
 def delete_client(db: Session, client: Client) -> None:
+    """Remove the client and every row that belongs to it. SQLite does not enforce the
+    TDS tables' ON DELETE CASCADE, so each table holding a client_id is cleared here,
+    children before parents."""
+    for table in reversed(Base.metadata.sorted_tables):
+        if "client_id" in table.c and table.name != "clients":
+            db.execute(table.delete().where(table.c.client_id == client.id))
     db.delete(client)
     db.commit()

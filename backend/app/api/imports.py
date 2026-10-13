@@ -15,7 +15,8 @@ from app.schemas.imports import (
     JsonPreview,
     MappingBody,
 )
-from app.services import import_json_service, import_service
+from app.models import ImportLog
+from app.services import import_delete, import_json_service, import_service
 from app.services.fy_utils import is_valid_fy
 from app.services.tally_importer import REPORT_TYPES, ImportFormatError
 
@@ -96,6 +97,15 @@ async def confirm_import(
 @router.get("/log", response_model=list[ImportLogRead])
 def import_log(client_id: int | None = None, db: Session = Depends(get_db)):
     return import_repo.list_logs(db, client_id)
+
+
+@router.delete("/log/{log_id}")
+def delete_import(log_id: int, db: Session = Depends(get_db)):
+    """Delete one upload (both registers of a Tally JSON import) and the data it added."""
+    log = db.get(ImportLog, log_id)
+    if log is None:
+        raise HTTPException(404, "Import not found")
+    return import_delete.delete_import(db, log)
 
 
 @router.get("/mapping/{client_id}/{report_type}", response_model=MappingBody | None)

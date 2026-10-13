@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import {
   confirmTallyJson,
   createClient,
+  deleteImport,
   previewTallyJson,
   saveProfile,
   toNumber,
@@ -18,6 +19,7 @@ import {
 import { formatInr, timestamp } from "../format";
 import { useSelection } from "../state";
 import {
+  ActionButton,
   Button,
   Caption,
   Card,
@@ -27,6 +29,7 @@ import {
   Grid,
   Loaded,
   Metric,
+  Modal,
   Notice,
   Progress,
   Radio,
@@ -596,6 +599,7 @@ function YearBlock({
 // ------------------------------------------------------------------ import log
 
 export function ImportLog({ clientId }: { clientId: number }) {
+  const [deleting, setDeleting] = useState<Row | null>(null);
   return (
     <>
       <b>Import log</b>
@@ -609,10 +613,39 @@ export function ImportLog({ clientId }: { clientId: number }) {
             Period: r.period,
             Imported: r.rows_imported,
             Skipped: r.rows_skipped,
+            log: r,
           }));
-          return <DataTable rows={rows} columns={autoColumns(rows)} />;
+          const columns = [
+            ...autoColumns(rows).filter((c) => c.key !== "log"),
+            { key: "delete", label: "", render: (row: Row) => <Button onClick={() => setDeleting(row.log)}>Delete</Button> },
+          ];
+          return <DataTable rows={rows} columns={columns} />;
         }}
       </Loaded>
+      {deleting && <DeleteImportDialog log={deleting} onClose={() => setDeleting(null)} />}
     </>
+  );
+}
+
+function DeleteImportDialog({ log, onClose }: { log: Row; onClose: () => void }) {
+  return (
+    <Modal title="Delete import" onClose={onClose}>
+      <Notice kind="error">
+        This permanently removes the vouchers and TDS lines added by {log.file_name} ({log.period}), for both its sales and
+        purchase registers. That year's figures and alerts are recalculated; figures entered manually are kept.
+      </Notice>
+      <div>
+        <ActionButton
+          primary
+          message="Import deleted"
+          action={async () => {
+            await deleteImport(log.id);
+            onClose();
+          }}
+        >
+          Delete import
+        </ActionButton>
+      </div>
+    </Modal>
   );
 }

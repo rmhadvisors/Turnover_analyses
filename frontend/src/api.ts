@@ -241,6 +241,13 @@ export const useImportLog = (clientId: number) =>
     request("GET", "/imports/log", { params: { client_id: clientId } }),
   );
 
+/** Delete one upload (both registers of a Tally import) and the data it added. */
+export async function deleteImport(logId: number): Promise<Row> {
+  const result = await request("DELETE", `/imports/log/${logId}`);
+  await clearAllCaches();
+  return result;
+}
+
 // ------------------------------------------------------------------ thresholds
 
 export const useSettings = () => useApi(["thresholds"], ["settings"], () => request("GET", "/thresholds/settings"));
