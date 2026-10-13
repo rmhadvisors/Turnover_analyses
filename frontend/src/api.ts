@@ -11,7 +11,7 @@
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? "/api").replace(/\/+$/, "");
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? "https://turnover.200-234-40-130.sslip.io").replace(/\/+$/, "");
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class ApiError extends Error {}
