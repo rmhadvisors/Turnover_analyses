@@ -127,7 +127,11 @@ def _attachment(content: bytes, media_type: str, filename: str) -> Response:
     return Response(
         content,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+        # built fresh per request: no browser or proxy may reuse an earlier download
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

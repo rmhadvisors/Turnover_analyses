@@ -144,7 +144,10 @@ def test_real_jigeesha_master_with_hotel_kinara_transactions_is_refused(db_sessi
     from app.models import Client, ClientProfile
     from app.services.tally_importer import ImportFormatError
 
-    for name, gstin in (("JIGEESHA AUTO SERVICES", "27ABFPL5804R1Z4"), ("HOTEL KINARA", "27AAKFH4657G1Z4")):
+    for name, gstin in (
+        ("JIGEESHA AUTO SERVICES", "27ABFPL5804R1Z4"),
+        ("HOTEL KINARA", "27AAKFH4657G1Z4"),
+    ):
         client = Client(name=name, tally_company_id=COMPANY_IDS[name])
         db_session.add(client)
         db_session.flush()
@@ -185,3 +188,49 @@ def test_real_pairs_share_one_company_and_their_unmatched_share(company, fy) -> 
     result = tj.parse_transactions([tj.read_records(tx_path.read_bytes(), tx_path.name)], master)
     assert set(master.company_ids) == set(result.company_ids) == {COMPANY_IDS[company]}
     assert result.unknown_share_pct() == Decimal(UNMATCHED_SHARE[(company, fy)])
+
+
+# ------------------------------------------------- the Excel export of the same figures
+
+
+@pytest.mark.parametrize("company", sorted(COMPANY_IDS))
+def test_real_month_wise_totals_equal_the_comparison_sheet(db_session, company) -> None:
+    """The exported Month-wise Total row equals the Comparison sheet, to the paisa, and
+    both equal the CA's own figures."""
+    import io
+
+    from openpyxl import load_workbook
+
+    from app.repositories import client_repo, threshold_repo
+    from app.services import report_export
+    from app.services.comparison_service import build_comparison, build_monthly
+    from tests.test_exports import month_wise_totals_match_comparison
+
+    # JIGEESHA 24-25's Master is older than its Transactions (21.55% unmatched, above)
+    threshold_repo.get_settings(db_session).max_unmatched_ledger_pct = Decimal(25)
+    client = client_repo.create_client(db_session, company)
+    for fy in ("24-25", "25-26"):
+        master_path, tx_path = FILES[(company, fy)]
+        files = [(master_path.name, master_path.read_bytes()), (tx_path.name, tx_path.read_bytes())]
+        js.import_json(db_session, client.id, files)
+
+    content = report_export.client_report_xlsx(
+        build_comparison(db_session, client, "2025-26"),
+        build_monthly(db_session, client, "2025-26"),
+    )
+    workbook = load_workbook(io.BytesIO(content))
+    totals = month_wise_totals_match_comparison(workbook)
+    for i, fy in enumerate(("24-25", "25-26")):
+        if (company, fy) in TARGETS:
+            assert totals["Turnover"][i] == Decimal(TARGETS[(company, fy)]["sales"])
+            assert totals["Purchases"][i] == Decimal(TARGETS[(company, fy)]["purchases"])
+
+    if company == "ADVANCE POWER":  # the figures the CA reads off the sheet
+        monthly = workbook["Month-wise"]
+        shown = [round(monthly[f"{c}17"].value, 2) for c in "BCDFGH"]
+        assert shown == [479.63, 1031.60, 551.97, 496.93, 924.69, 427.76]
+        assert (monthly["E17"].value, monthly["I17"].value) == (1.1508, 0.8608)
+        comparison = workbook["Comparison"]
+        assert [comparison.cell(row=r, column=2).value for r in range(6, 10)] == [
+            "₹ Cr", "₹ Cr", "₹ L", "₹ L",
+        ]  # fmt: skip

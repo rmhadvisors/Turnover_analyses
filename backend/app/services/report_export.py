@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -17,7 +17,6 @@ from xml.sax.saxutils import escape
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.shapes import Drawing, Rect, String
 from reportlab.lib import colors
@@ -37,6 +36,7 @@ from reportlab.platypus import (
 
 from app.schemas.reports import SummaryRow
 from app.services.alert_engine import BAND_DISPLAY, AbsoluteLimitStatus
+from app.services.calculations import compare_metric
 from app.services.comparison_service import (
     ClientComparison,
     MonthlyComparison,
@@ -53,8 +53,16 @@ PURCHASE_COLOUR = "#eb6834"  # categorical slot 2 (orange)
 STATUS_TEXT = {"critical": "B42318", "warning": "A15C07", "ok": "137333", "none": "5F6368"}
 STATUS_FILL = {"critical": "FDE7E7", "warning": "FFF1CC", "ok": "E3F4E7", "none": "F1F3F4"}
 
+# The deployed server's clock is UTC; stamp exports in India time (no DST, so a fixed offset).
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
 RUPEE = "₹"
 FMT_INDIAN_FULL = f'[>=10000000]"{RUPEE}"##\\,##\\,##\\,##0.00;[>=100000]"{RUPEE}"##\\,##\\,##0.00;"{RUPEE}"#,##0.00'
+
+
+def generated_stamp() -> str:
+    """When this file is being built, e.g. 'Generated 27-Oct-2026 17:16 IST'."""
+    return f"Generated {datetime.now(IST):%d-%b-%Y %H:%M} IST"
 
 
 def _tone(band: str | None) -> str:
@@ -99,6 +107,7 @@ def _text(ws, ref: str, value: str, font: Font | None = None) -> None:
 
 _THIN = Side(style="thin", color="BFC3C7")
 _BOX = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_BLOCK_RULE = Side(style="thin", color="1F3A5F")
 _HEAD_FILL = PatternFill("solid", fgColor="1F3A5F")
 
 
@@ -122,7 +131,32 @@ def _put_money(ws, row: int, col: int, value: Decimal | None, unit: str, arrows:
     return cell
 
 
-def _comparison_sheet(ws, report: ClientComparison, unit: str) -> None:
+ROW_UNIT_LABEL = {"full": RUPEE, "lakhs": f"{RUPEE} L", "crores": f"{RUPEE} Cr"}
+
+
+def _row_unit(values: tuple[Decimal | None, ...], unit: str) -> str:
+    """One unit for a whole Comparison row, so its Unit cell is true of every figure in it."""
+    if unit != "auto":
+        return unit
+    biggest = max((abs(v) for v in values if v is not None), default=Decimal(0))
+    return "crores" if biggest >= CRORE else "lakhs"
+
+
+def _put_pct(ws, row: int, col: int, pct: Decimal | None):
+    """Change % as a real percentage (115.08%), green up / red down; "—" with no baseline."""
+    cell = ws.cell(row=row, column=col)
+    if pct is not None:
+        cell.value = float(pct / 100)
+        cell.number_format = "0.00%"
+        if pct != 0:
+            cell.font = Font(color="137333" if pct > 0 else "B42318")
+    else:
+        cell.value = "—"
+    cell.alignment, cell.border = Alignment(horizontal="right"), _BOX
+    return cell
+
+
+def _comparison_sheet(ws, report: ClientComparison, unit: str, generated: str) -> None:
     title = f"TURNOVER COMPARISON – FY {report.fy}"
     if report.is_ytd:
         title += f" (YTD {report.period_label})"
@@ -131,40 +165,37 @@ def _comparison_sheet(ws, report: ClientComparison, unit: str) -> None:
     _text(ws, "A1", title, Font(bold=True, size=14))
     _text(ws, "A2", f"Client: {report.client_name}", Font(bold=True))
     unit_note = {"auto": "lakhs / crores", "lakhs": "lakhs", "crores": "crores", "full": "rupees"}
-    ws["A3"] = f"Amounts in {unit_note[unit]}. Generated {datetime.now():%d-%b-%Y %H:%M}."
-    ws["A3"].font = Font(italic=True, color="5F6368")
+    _text(ws, "A3", generated, Font(bold=True, color="1F3A5F"))
+    ws["A4"] = f"Amounts in {unit_note[unit]}."
+    ws["A4"].font = Font(italic=True, color="5F6368")
 
     _header_row(
-        ws, 5, ["Particular", f"FY {report.previous_fy}", f"FY {report.fy}", "Difference",
+        ws, 5, ["Particular", "Unit", f"FY {report.previous_fy}", f"FY {report.fy}", "Difference",
                 "Change %", "Status", "Flag"]
     )  # fmt: skip
     for offset, row in enumerate(report.rows):
         r = 6 + offset
         difference = row.comparison.difference if row.comparison else None
         pct = row.comparison.change_pct if row.comparison else None
+        row_unit = _row_unit((row.previous, row.current), unit)
         ws.cell(row=r, column=1, value=row.label).font = Font(bold=True)
-        _put_money(ws, r, 2, row.previous, unit)
-        _put_money(ws, r, 3, row.current, unit)
-        diff_cell = _put_money(ws, r, 4, difference, unit, arrows=True)
-        pct_cell = ws.cell(row=r, column=5)
-        if pct is not None:
-            pct_cell.value = float(pct / 100)
-            pct_cell.number_format = "0.00%"
-        else:
-            pct_cell.value = "—"
-        pct_cell.alignment, pct_cell.border = Alignment(horizontal="right"), _BOX
+        unit_cell = ws.cell(row=r, column=2, value=ROW_UNIT_LABEL[row_unit])
+        unit_cell.alignment = Alignment(horizontal="center")
+        _put_money(ws, r, 3, row.previous, row_unit)
+        _put_money(ws, r, 4, row.current, row_unit)
+        diff_cell = _put_money(ws, r, 5, difference, row_unit, arrows=True)
+        _put_pct(ws, r, 6, pct)
         label = BAND_DISPLAY[row.band][1] if row.band else NO_COMPARISON_LABEL
         tone = _tone(row.band.value if row.band else None)
-        status = ws.cell(row=r, column=6, value=label)
+        status = ws.cell(row=r, column=7, value=label)
         status.font = Font(bold=True, color=STATUS_TEXT[tone])
         status.fill = PatternFill("solid", fgColor=STATUS_FILL[tone])
         flag = SIGN_FLAGS.get(row.comparison.sign_change) if row.comparison else None
-        ws.cell(row=r, column=7, value=flag or "")
-        for col in (1, 6, 7):
+        ws.cell(row=r, column=8, value=flag or "")
+        for col in (1, 2, 7, 8):
             ws.cell(row=r, column=col).border = _BOX
         if difference is not None and difference != 0:
-            colour = "137333" if difference > 0 else "B42318"
-            diff_cell.font = pct_cell.font = Font(color=colour)
+            diff_cell.font = Font(color="137333" if difference > 0 else "B42318")
 
     r = 6 + len(report.rows) + 1
     ws.cell(row=r, column=1, value="Absolute limit alerts").font = Font(bold=True, size=12)
@@ -186,7 +217,7 @@ def _comparison_sheet(ws, report: ClientComparison, unit: str) -> None:
         ws.cell(row=r, column=1, value=note).font = Font(italic=True, color="5F6368")
         r += 1
 
-    for col, width in zip("ABCDEFG", (18, 16, 16, 18, 12, 26, 18), strict=True):
+    for col, width in zip("ABCDEFGH", (18, 8, 16, 16, 18, 12, 26, 18), strict=True):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = "A6"
     ws.page_setup.orientation = "landscape"
@@ -194,40 +225,61 @@ def _comparison_sheet(ws, report: ClientComparison, unit: str) -> None:
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
 
-def _monthly_sheet(wb: Workbook, monthly: MonthlyComparison, fy: str, previous_fy: str) -> None:
+def _monthly_sheet(
+    wb: Workbook, monthly: MonthlyComparison, fy: str, previous_fy: str, generated: str
+) -> None:
     ws = wb.create_sheet("Month-wise")
     _text(ws, "A1", "Month-wise sales vs purchases (₹ lakhs)", Font(bold=True, size=13))
     ws["A2"] = "Net of credit / debit notes. Built from imported vouchers."
     ws["A2"].font = Font(italic=True, color="5F6368")
-    _header_row(ws, 4, ["Month", f"Sales FY {fy}", f"Purchases FY {fy}",
-                        f"Sales FY {previous_fy}", f"Purchases FY {previous_fy}"])  # fmt: skip
-    for i, month in enumerate(monthly.months):
-        r = 5 + i
-        ws.cell(row=r, column=1, value=month).border = _BOX
-        for col, series in ((2, monthly.current.sales), (3, monthly.current.purchases),
-                            (4, monthly.previous.sales), (5, monthly.previous.purchases)):  # fmt: skip
-            cell = ws.cell(row=r, column=col, value=float(series[i] / LAKH))
-            cell.number_format = f'"{RUPEE}"#,##0.00" L"'
-            cell.border = _BOX
+    _text(ws, "A3", generated, Font(bold=True, color="1F3A5F"))
+    # Grouped by metric, previous year first: prev | cur | Difference | Change % per block
+    blocks = (
+        ("Sales", 2, monthly.previous.sales, monthly.current.sales),
+        ("Purchases", 6, monthly.previous.purchases, monthly.current.purchases),
+    )
+    headers = ["Month"]
+    for metric, *_ in blocks:
+        headers += [f"{metric} FY {previous_fy}", f"{metric} FY {fy}",
+                    f"{metric} Difference", f"{metric} Change %"]  # fmt: skip
+    _header_row(ws, 4, headers)
     total_row = 5 + len(monthly.months)
-    ws.cell(row=total_row, column=1, value="Total").font = Font(bold=True)
-    for col in range(2, 6):
-        letter = get_column_letter(col)
-        cell = ws.cell(row=total_row, column=col, value=f"=SUM({letter}5:{letter}{total_row - 1})")
-        cell.number_format = f'"{RUPEE}"#,##0.00" L"'
-        cell.font = Font(bold=True)
-    for col in "ABCDE":
+    rows = [(month, i) for i, month in enumerate(monthly.months)] + [("Total", None)]
+    for r, (month, i) in enumerate(rows, start=5):
+        bold = i is None  # the Total row
+        ws.cell(row=r, column=1, value=month).font = Font(bold=bold)
+        ws.cell(row=r, column=1).border = _BOX
+        for _metric, col, previous, current in blocks:
+            # Totals are written as values, not =SUM(): readers that do not
+            # recalculate (previews, pandas, openpyxl) would otherwise show blanks.
+            prev = sum(previous, Decimal(0)) if bold else previous[i]
+            cur = sum(current, Decimal(0)) if bold else current[i]
+            for offset, value in enumerate((prev, cur)):
+                cell = ws.cell(row=r, column=col + offset, value=float(value / LAKH))
+                cell.number_format = f'"{RUPEE}"#,##0.00" L"'
+                cell.border = _BOX
+                cell.font = Font(bold=bold)
+            difference = cur - prev
+            diff_cell = _put_money(ws, r, col + 2, difference, "lakhs", arrows=True)
+            colour = None if difference == 0 else "137333" if difference > 0 else "B42318"
+            diff_cell.font = Font(bold=bold, color=colour)
+            pct_cell = _put_pct(ws, r, col + 3, compare_metric(prev, cur).change_pct)
+            pct_cell.font = Font(bold=bold, color=pct_cell.font.color)
+    # thin dark rule between the sales and purchases blocks
+    for r in range(4, total_row + 1):
+        cell = ws.cell(row=r, column=5)
+        cell.border = Border(left=_THIN, top=_THIN, bottom=_THIN, right=_BLOCK_RULE)
+    for col in "ABCDEFGHI":
         ws.column_dimensions[col].width = 20
 
-    for anchor, first_col, title in (("G4", 2, f"FY {fy}"), ("G22", 4, f"FY {previous_fy}")):
+    for anchor, cols, title in (("K4", (3, 7), f"FY {fy}"), ("K22", (2, 6), f"FY {previous_fy}")):
         chart = BarChart()
         chart.type, chart.grouping = "col", "clustered"
         chart.title = f"Sales vs purchases – {title} (₹ lakhs)"
         chart.y_axis.title = "₹ lakhs"
-        data = Reference(
-            ws, min_col=first_col, max_col=first_col + 1, min_row=4, max_row=total_row - 1
-        )
-        chart.add_data(data, titles_from_data=True)
+        for col in cols:
+            data = Reference(ws, min_col=col, min_row=4, max_row=total_row - 1)
+            chart.add_data(data, titles_from_data=True)
         chart.set_categories(Reference(ws, min_col=1, min_row=5, max_row=total_row - 1))
         chart.series[0].graphicalProperties.solidFill = SALES_COLOUR.lstrip("#")
         chart.series[1].graphicalProperties.solidFill = PURCHASE_COLOUR.lstrip("#")
@@ -278,12 +330,13 @@ def client_report_xlsx(
     unit: str = "auto",
     tds: dict | None = None,
 ) -> bytes:
+    generated = generated_stamp()  # one build time for every sheet
     wb = Workbook()
     ws = wb.active
     ws.title = "Comparison"
-    _comparison_sheet(ws, report, unit)
+    _comparison_sheet(ws, report, unit, generated)
     if monthly is not None and monthly.has_data:
-        _monthly_sheet(wb, monthly, report.fy, report.previous_fy)
+        _monthly_sheet(wb, monthly, report.fy, report.previous_fy, generated)
     if tds is not None and tds["has_data"]:
         _tds_sheet(wb, tds, report.fy)
     buffer = io.BytesIO()
@@ -297,7 +350,7 @@ def summary_xlsx(rows: list[SummaryRow], fy: str, unit: str = "auto") -> bytes:
     ws = wb.active
     ws.title = "Summary"
     _text(ws, "A1", f"TURNOVER SUMMARY – FY {fy}", Font(bold=True, size=14))
-    ws["A2"] = f"Sorted by size of turnover change. Generated {datetime.now():%d-%b-%Y %H:%M}."
+    ws["A2"] = f"Sorted by size of turnover change. {generated_stamp()}."
     ws["A2"].font = Font(italic=True, color="5F6368")
     headers = ["Client", "Previous FY turnover", "Current FY turnover", "Change %", "Status",
                "Net profit flag", "Limits crossed", "Limits approaching", "Open alerts",
@@ -446,7 +499,7 @@ def _pdf_footer(canvas, doc) -> None:
     canvas.drawString(
         15 * mm,
         8 * mm,
-        f"Generated {datetime.now():%d-%b-%Y %H:%M} · Turnover Analysis & Alert Tool",
+        f"{generated_stamp()} · Turnover Analysis & Alert Tool",
     )
     canvas.drawRightString(landscape(A4)[0] - 15 * mm, 8 * mm, f"Page {doc.page}")
     canvas.restoreState()
