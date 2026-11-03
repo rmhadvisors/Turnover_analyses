@@ -95,6 +95,7 @@ class ClientComparison:
     rows: list[MetricRow]
     limits: list[LimitResult]
     notes: list[str] = field(default_factory=list)
+    data_through: date | None = None  # last voucher date of an in-progress FY
 
 
 def _has_type(vouchers: list[VoucherAmount], types: dict) -> bool:
@@ -105,9 +106,46 @@ def _figure_values(figures) -> dict[str, Decimal | None]:
     return {key: getattr(figures, key) if figures else None for key, _ in METRICS}
 
 
+def data_cutoff(
+    db: Session, client_id: int, fy: str, as_of: date
+) -> tuple[date | None, date | None]:
+    """(cutoff, latest) voucher dates of `fy` while it is in progress, else (None, None).
+
+    An in-progress FY is only as current as its imported data: months after the last
+    voucher have not been loaded, so comparisons stop there rather than at today's date.
+    When sales and purchases were loaded to different dates, `cutoff` is the earlier one,
+    so both are compared over months that are loaded; `latest` is the later one.
+    """
+    if not is_fy_in_progress(fy, as_of):
+        return None, None
+    vouchers = [
+        v for v in voucher_repo.amounts_for_fy(db, client_id, fy) if v.voucher_date <= as_of
+    ]
+    last = [
+        max(v.voucher_date for v in vouchers if v.voucher_type in types)
+        for types in (SALES_TYPES, PURCHASE_TYPES)
+        if _has_type(vouchers, types)
+    ]
+    return (min(last), max(last)) if last else (None, None)
+
+
+def _later_data_note(cutoff: date | None, latest: date | None) -> str | None:
+    if (
+        cutoff is None
+        or latest is None
+        or (latest.year, latest.month) <= (cutoff.year, cutoff.month)
+    ):
+        return None
+    return (
+        f"Vouchers are also recorded through {latest:%b-%Y}; only months loaded for both "
+        f"sales and purchases (to {cutoff:%d-%b-%Y}) are compared."
+    )
+
+
 def _apply_ytd_vouchers(
-    db: Session, client_id: int, fy: str, as_of: date, include_gst: bool, cur, prev
-) -> tuple[str, list[str]]:
+    db: Session, client_id: int, fy: str, as_of: date, include_gst: bool, cur, prev,
+    data_through: date | None,
+) -> tuple[str, list[str]]:  # fmt: skip
     """Overwrite turnover/purchases in `cur`/`prev` with month-matched YTD voucher totals."""
     cur_window, prev_window = ytd_window_pair(fy, as_of)
     cur_v = voucher_repo.amounts_for_range(db, client_id, cur_window.start, cur_window.end)
@@ -120,9 +158,14 @@ def _apply_ytd_vouchers(
     ):
         if _has_type(cur_v, types) or _has_type(prev_v, types):
             cur[key], prev[key] = total(cur_v, include_gst), total(prev_v, include_gst)
-    notes.append(
-        f"FY {fy} is in progress: turnover and purchases are {label} vs {label} of the previous FY."
-    )
+    if data_through:
+        notes.append(f"FY {fy} in progress — data to {data_through:%d-%b-%Y}.")
+        notes.append(f"Turnover and purchases are compared for {label} in both years.")
+    else:
+        notes.append(
+            f"FY {fy} is in progress: turnover and purchases are compared "
+            "for the same months of both years."
+        )
     if cur["gross_profit"] is not None or cur["net_profit"] is not None:
         notes.append("Profit figures are compared as entered/imported and are not period-matched.")
     return label, notes
@@ -273,8 +316,14 @@ def build_comparison(
     is_ytd = is_fy_in_progress(fy, as_of)
     is_period_matched = False
     label, notes = None, []
+    data_through, latest = data_cutoff(db, client.id, fy, as_of)
+    window_end = data_through or as_of  # every comparison uses the period the data covers
     if is_ytd:
-        label, notes = _apply_ytd_vouchers(db, client.id, fy, as_of, include_gst, cur, prev)
+        label, notes = _apply_ytd_vouchers(
+            db, client.id, fy, window_end, include_gst, cur, prev, data_through
+        )
+        if later := _later_data_note(data_through, latest):
+            notes.append(later)
     else:
         matched = _matched_available_period(db, client.id, fy)
         if matched:
@@ -298,7 +347,7 @@ def build_comparison(
                 f"Comparison for {label}; one or both historical exports are incomplete. "
                 "Sales and purchases use only the period covered in both years."
             )
-    months = months_elapsed_in_fy(fy, as_of)
+    months = months_elapsed_in_fy(fy, window_end)
 
     rows = []
     for key, name in METRICS:
@@ -315,8 +364,9 @@ def build_comparison(
 
     limits = _limit_results(db, client.id, fy, as_of, include_gst, cur)
     return ClientComparison(
-        client.id, client.name, fy, prev_fy, is_ytd, is_period_matched, label, rows, limits, notes
-    )
+        client.id, client.name, fy, prev_fy, is_ytd, is_period_matched, label, rows, limits, notes,
+        data_through,
+    )  # fmt: skip
 
 
 MONTH_LABELS = ("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar")
@@ -337,6 +387,13 @@ class MonthlyComparison:
     current: MonthlySeries
     previous: MonthlySeries
     has_data: bool
+    active_months: int = 12  # months with data in `current`; later months are not yet loaded
+    data_through: date | None = None  # last voucher date, set only while the FY is in progress
+    later_data_note: str | None = None  # one side was loaded further than `data_through`
+
+    @property
+    def is_incomplete(self) -> bool:
+        return self.active_months < len(self.months)
 
 
 def _fy_months(fy: str) -> list[tuple[int, int]]:
@@ -351,10 +408,18 @@ def _series(db: Session, client_id: int, fy: str, include_gst: bool) -> MonthlyS
     return MonthlySeries(fy, [p[0] for p in pairs], [p[1] for p in pairs])
 
 
-def build_monthly(db: Session, client: Client, fy: str) -> MonthlyComparison:
+def build_monthly(
+    db: Session, client: Client, fy: str, as_of: date | None = None
+) -> MonthlyComparison:
     """Month-wise net sales and purchases for `fy` and the previous FY (from vouchers)."""
+    as_of = as_of or date.today()
     include_gst = threshold_repo.get_settings(db).include_gst_in_turnover
     current = _series(db, client.id, fy, include_gst)
     previous = _series(db, client.id, previous_fy(fy), include_gst)
     has_data = any(v for s in (current, previous) for v in s.sales + s.purchases)
-    return MonthlyComparison(client.id, client.name, MONTH_LABELS, current, previous, has_data)
+    data_through, latest = data_cutoff(db, client.id, fy, as_of)
+    active = months_elapsed_in_fy(fy, data_through or as_of) if is_fy_in_progress(fy, as_of) else 12
+    return MonthlyComparison(
+        client.id, client.name, MONTH_LABELS, current, previous, has_data, active, data_through,
+        _later_data_note(data_through, latest),
+    )  # fmt: skip

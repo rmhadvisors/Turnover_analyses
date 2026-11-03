@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { ApiError } from "./api";
+import { ApiError, BACKEND_CONFIGURED, BACKEND_HOST, BACKEND_IS_LOCAL } from "./api";
 
 // ------------------------------------------------------------ text blocks
 
@@ -466,4 +466,21 @@ export function toCsv(rows: Record<string, unknown>[]): Blob {
   };
   const text = [keys.map(cell).join(","), ...rows.map((r) => keys.map((k) => cell(r[k])).join(","))].join("\r\n");
   return new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" });
+}
+
+/** Which backend this page is talking to, always visible: local, deployed, or not configured. */
+export function BackendBanner() {
+  if (!BACKEND_CONFIGURED) {
+    return (
+      <div className="backend-banner none" role="alert">
+        <b>NO BACKEND CONFIGURED</b> — set VITE_BACKEND_URL in frontend/.env and restart <code>npm run dev</code>. Nothing will load until you do.
+      </div>
+    );
+  }
+  return (
+    <div className={`backend-banner ${BACKEND_IS_LOCAL ? "local" : "deployed"}`} title="The server this page reads from and downloads exports from.">
+      <b>{BACKEND_IS_LOCAL ? "● LOCAL" : "● DEPLOYED"}</b> backend: <code>{BACKEND_HOST}</code>
+      {BACKEND_IS_LOCAL ? "" : " — downloads come from this server's code, not your local code"}
+    </div>
+  );
 }

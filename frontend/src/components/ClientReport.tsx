@@ -75,9 +75,8 @@ export default function ClientReport({ client, fy }: { client: Row; fy: string |
 }
 
 function Comparison({ report, unit }: { report: Row; unit: string }) {
-  let heading = `Turnover comparison · FY ${report.fy}`;
-  if (report.is_ytd) heading += ` · YTD ${report.period_label}`;
-  else if (report.is_period_matched) heading += ` · Matched period ${report.period_label}`;
+  // Same heading as the Excel and PDF exports; the period is a note below the table, not part of it.
+  const heading = `TURNOVER ANALYSIS — FY ${report.previous_fy} vs FY ${report.fy}`;
   const rows = report.rows.map((row: Row) => {
     const difference = toNumber(row.difference);
     return {

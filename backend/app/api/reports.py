@@ -108,7 +108,9 @@ def client_report(
     _check_fy(fy)
     return ClientReportRead(
         comparison=comparison_to_read(build_comparison(db, client, fy, as_of)),
-        monthly=MonthlyRead.model_validate(build_monthly(db, client, fy), from_attributes=True),
+        monthly=MonthlyRead.model_validate(
+            build_monthly(db, client, fy, as_of), from_attributes=True
+        ),
         # alerts of a deleted limit (e.g. the TDS sections once seeded as turnover limits)
         # stay in the Alerts history but are not part of the client's report
         alerts=[
@@ -159,7 +161,7 @@ def export_client_report(
     """Download the Turnover Comparison report as Excel or PDF."""
     _check_fy(fy)
     comparison = build_comparison(db, client, fy, as_of)
-    monthly = build_monthly(db, client, fy)
+    monthly = build_monthly(db, client, fy, as_of)
     stem = f"Turnover_Comparison_{client.name}_FY{fy}"
     tds = _tds_block(db, client.id, fy)
     if format == "pdf":

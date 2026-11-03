@@ -174,3 +174,10 @@ ul.plain { margin: .3rem 0; padding-left: 1.2rem; }
 .dropzone-pick { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .icon-btn.small { font-size: 1.15rem; }
 .detected { margin: .6rem 0; padding: .5rem .8rem; border-left: 3px solid var(--primary); background: var(--surface); border-radius: 6px; }
+
+/* ------------------------------------------------------------ backend banner */
+.backend-banner { position: sticky; top: 0; z-index: 12; margin: 0 0 .75rem; padding: .45rem .8rem; border-radius: 6px; font-size: .9rem; border: 1px solid; }
+.backend-banner code { font-size: .95em; }
+.backend-banner.local { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-fg); }
+.backend-banner.deployed { background: var(--warning-bg); color: var(--warning-fg); border-color: var(--warning-fg); }
+.backend-banner.none { background: var(--critical-bg); color: var(--critical-fg); border-color: var(--critical-fg); }

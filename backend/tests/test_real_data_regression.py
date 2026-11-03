@@ -227,9 +227,10 @@ def test_real_month_wise_totals_equal_the_comparison_sheet(db_session, company) 
 
     if company == "ADVANCE POWER":  # the figures the CA reads off the sheet
         monthly = workbook["Month-wise"]
-        shown = [round(monthly[f"{c}17"].value, 2) for c in "BCDFGH"]
+        sales, purchases = 21, 39  # the Total rows of the two stacked blocks
+        shown = [round(monthly[f"{c}{r}"].value, 2) for r in (sales, purchases) for c in "BCD"]
         assert shown == [479.63, 1031.60, 551.97, 496.93, 924.69, 427.76]
-        assert (monthly["E17"].value, monthly["I17"].value) == (1.1508, 0.8608)
+        assert (monthly[f"E{sales}"].value, monthly[f"E{purchases}"].value) == (1.1508, 0.8608)
         comparison = workbook["Comparison"]
         assert [comparison.cell(row=r, column=2).value for r in range(6, 10)] == [
             "₹ Cr", "₹ Cr", "₹ L", "₹ L",

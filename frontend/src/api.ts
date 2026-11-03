@@ -11,7 +11,14 @@
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? "https://turnover.200-234-40-130.sslip.io").replace(/\/+$/, "");
+// No fallback: a missing VITE_BACKEND_URL used to fall through silently to the deployed server,
+// so a local run showed the deployed server's (old) behaviour. Now it is an error on screen.
+const BACKEND_URL = String(import.meta.env.VITE_BACKEND_URL ?? "").trim().replace(/\/+$/, "");
+export const BACKEND_CONFIGURED = BACKEND_URL !== "";
+const BACKEND_HOSTNAME = BACKEND_CONFIGURED ? new URL(BACKEND_URL).hostname : "";
+export const BACKEND_HOST = BACKEND_CONFIGURED ? new URL(BACKEND_URL).host : "";
+export const BACKEND_IS_LOCAL = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(BACKEND_HOSTNAME);
+const NOT_CONFIGURED = "No backend is configured. Set VITE_BACKEND_URL in frontend/.env (local) or in the host's environment settings (deployed), then restart or rebuild.";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class ApiError extends Error {}
@@ -48,6 +55,7 @@ export const clearAllCaches = () => invalidate(...ALL_GROUPS);
 type Params = Record<string, string | number | boolean | null | undefined>;
 
 function url(path: string, params?: Params): string {
+  if (!BACKEND_CONFIGURED) throw new ApiError(NOT_CONFIGURED);
   const query = new URLSearchParams();
   for (const [k, v] of Object.entries(params ?? {})) {
     if (v !== null && v !== undefined && v !== "") query.set(k, String(v));
@@ -71,8 +79,9 @@ function detailOf(status: number, text: string): string {
 
 async function send(method: string, path: string, opts: { params?: Params; json?: unknown; form?: FormData } = {}) {
   let response: Response;
+  const target = url(path, opts.params); // throws "no backend configured" before any network call
   try {
-    response = await fetch(url(path, opts.params), {
+    response = await fetch(target, {
       method,
       headers: opts.json !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: opts.json !== undefined ? JSON.stringify(opts.json) : opts.form,

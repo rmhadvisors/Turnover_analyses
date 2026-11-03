@@ -10,7 +10,7 @@ import DashboardPage from "./pages/Dashboard";
 import DataPage from "./pages/Data";
 import SettingsPage from "./pages/Settings";
 import { useSelection } from "./state";
-import { Button, ErrorNotice, Select, TextInput } from "./ui";
+import { BackendBanner, Button, ErrorNotice, Select, TextInput } from "./ui";
 
 const PAGES: [string, string, string][] = [
   ["/", "Dashboard", "▦"],
@@ -93,6 +93,7 @@ export default function App() {
       </aside>
       {menuOpen && <div className="sidebar-backdrop" onClick={() => setMenuOpen(false)} />}
       <main className="main">
+        <BackendBanner />
         <span className="menu-btn">
           <Button onClick={() => setMenuOpen(true)}>☰ Menu</Button>
         </span>
