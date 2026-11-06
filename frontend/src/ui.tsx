@@ -468,7 +468,7 @@ export function toCsv(rows: Record<string, unknown>[]): Blob {
   return new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" });
 }
 
-/** Which backend this page is talking to, always visible: local, deployed, or not configured. */
+/** Shown only for a local backend or when none is configured; hidden on the deployed portal. */
 export function BackendBanner() {
   if (!BACKEND_CONFIGURED) {
     return (
@@ -477,10 +477,11 @@ export function BackendBanner() {
       </div>
     );
   }
+  // The deployed portal shows nothing: the banner exists to warn when you are NOT on it.
+  if (!BACKEND_IS_LOCAL) return null;
   return (
-    <div className={`backend-banner ${BACKEND_IS_LOCAL ? "local" : "deployed"}`} title="The server this page reads from and downloads exports from.">
-      <b>{BACKEND_IS_LOCAL ? "● LOCAL" : "● DEPLOYED"}</b> backend: <code>{BACKEND_HOST}</code>
-      {BACKEND_IS_LOCAL ? "" : " — downloads come from this server's code, not your local code"}
+    <div className="backend-banner local" title="The server this page reads from and downloads exports from.">
+      <b>● LOCAL</b> backend: <code>{BACKEND_HOST}</code>
     </div>
   );
 }
